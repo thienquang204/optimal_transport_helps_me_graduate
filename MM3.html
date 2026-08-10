@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>M³: Matryoshka Multimodal Models — Deep Dive &amp; Representation Learning Connections</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #f6f8fa;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            color: #1e293b;
+            line-height: 1.7;
+            padding: 2rem 1.5rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #ffffff;
+            border-radius: 24px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.06);
+            padding: 2.5rem 3rem;
+        }
+
+        h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, #0f172a, #ec4899);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 0.25rem;
+        }
+
+        .subtitle {
+            font-size: 1.05rem;
+            color: #64748b;
+            border-left: 4px solid #ec4899;
+            padding-left: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        h2 {
+            font-size: 1.7rem;
+            font-weight: 600;
+            margin-top: 2.8rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.4rem;
+            border-bottom: 2px solid #e9edf2;
+            color: #0f172a;
+        }
+
+        h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 2rem;
+            margin-bottom: 0.8rem;
+            color: #1e293b;
+        }
+
+        h4 {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+            color: #334155;
+        }
+
+        p {
+            margin-bottom: 1rem;
+            color: #334155;
+        }
+
+        ul,
+        ol {
+            margin: 0.5rem 0 1.2rem 1.8rem;
+        }
+
+        li {
+            margin-bottom: 0.4rem;
+        }
+
+        .highlight-box {
+            background: #f1f5f9;
+            border-radius: 14px;
+            padding: 1.5rem 2rem;
+            margin: 1.8rem 0;
+            border-left: 6px solid #ec4899;
+        }
+
+        .highlight-box strong {
+            color: #0f172a;
+        }
+
+        .code-block {
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 14px;
+            padding: 1.5rem 1.8rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+            font-family: "JetBrains Mono", "Fira Code", monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+
+        .code-block .comment {
+            color: #94a3b8;
+        }
+
+        .code-block .keyword {
+            color: #f472b6;
+        }
+
+        .code-block .func {
+            color: #60a5fa;
+        }
+
+        .code-block .string {
+            color: #34d399;
+        }
+
+        .code-block .number {
+            color: #fbbf24;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            font-size: 0.95rem;
+        }
+
+        th,
+        td {
+            padding: 0.7rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid #e9edf2;
+        }
+
+        th {
+            background: #f1f5f9;
+            font-weight: 600;
+            color: #0f172a;
+        }
+
+        tr:hover {
+            background: #f8fafc;
+        }
+
+        .tag {
+            display: inline-block;
+            background: #fce7f3;
+            color: #db2777;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.2rem 0.7rem;
+            border-radius: 20px;
+            margin-right: 0.3rem;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin: 1.2rem 0;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1.5rem;
+            }
+
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            .grid-2 {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .footnote {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            margin-top: 2rem;
+            border-top: 1px solid #e9edf2;
+            padding-top: 1.5rem;
+        }
+
+        .citation {
+            background: #fefce8;
+            border-radius: 8px;
+            padding: 0.1rem 0.4rem;
+            font-size: 0.85rem;
+            color: #a16207;
+        }
+
+        .comparison-box {
+            background: #f0fdf4;
+            border-radius: 14px;
+            padding: 1.5rem 2rem;
+            margin: 1.8rem 0;
+            border-left: 6px solid #22c55e;
+        }
+
+        .comparison-box strong {
+            color: #15803d;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+
+        <h1>🎎 Matryoshka Multimodal Models (M³)</h1>
+        <div class="subtitle">
+            Deep Dive · Core Ideas · Implementation · Connections to Representation Learning
+            <span style="display:inline-block;margin-left:1.5rem;font-size:0.85rem;color:#94a3b8;">
+                arXiv:2405.17430 (v2) &nbsp;|&nbsp; Cai et al.
+            </span>
+        </div>
+
+        <!-- ========================================================= -->
+        <h2>1. Core Idea — Nested Visual Tokens for LMMs</h2>
+
+        <p>
+            Large Multimodal Models (LMMs) like LLaVA embed images into a <strong>fixed, large number of visual
+                tokens</strong> (e.g., 576 for a 336×336 image)[reference:0]. This causes two problems:
+        </p>
+        <ul>
+            <li><strong>Inefficiency</strong> — high-resolution images and videos produce prohibitively long token
+                sequences[reference:1].</li>
+            <li><strong>Distraction</strong> — too many tokens can actually <em>harm</em> performance by diverting
+                attention from relevant information[reference:2].</li>
+        </ul>
+        <p>
+            Existing token pruning/merging methods (e.g., ToMe) produce a <strong>single-length output</strong> and
+            offer no flexibility in trading off information density vs. efficiency[reference:3].
+        </p>
+
+        <div class="highlight-box">
+            <strong>💡 M³'s insight:</strong> Learn <strong>nested sets of visual tokens</strong> that capture
+            information across multiple coarse-to-fine granularities[reference:4]. Under <em>one</em> suite of weights,
+            the model generates tokens at scales S ∈ {1, 9, 36, 144, 576}[reference:5], where each coarser set is a
+            subset of the finer set[reference:6].
+        </div>
+
+        <p>
+            This is a direct extension of the <strong>Matryoshka Representation Learning (MRL)</strong>
+            philosophy[reference:7]. While MRL learns nested <em>embeddings</em> along the <strong>feature
+                dimension</strong> (e.g., 8→2048 dims), M³ learns nested <em>tokens</em> along the <strong>sequence
+                length dimension</strong>. Both share the same core principle: <span class="citation">one model,
+                multiple granularities, zero extra parameters</span>.
+        </p>
+
+        <div class="comparison-box">
+            <strong>🔗 Connection to Representation Learning:</strong>
+            <ul>
+                <li><strong>MRL (Kusupati et al.)</strong> — nested <em>feature vectors</em> for adaptive <em>embedding
+                        dimensionality</em>.</li>
+                <li><strong>CSR (Wen et al.)</strong> — sparse <em>activation</em> for adaptive <em>computational
+                        sparsity</em>.</li>
+                <li><strong>M³ (this paper)</strong> — nested <em>token sequences</em> for adaptive <em>visual
+                        granularity</em> in LMMs.</li>
+            </ul>
+            All three share the Matryoshka spirit: <strong>train once, deploy at multiple resolutions/costs</strong>.
+        </div>
+
+        <!-- ========================================================= -->
+        <h2>2. Method — How M³ Works</h2>
+
+        <h3>2.1 Nested Token Construction</h3>
+        <p>
+            Starting from the CLIP visual encoder's 24×24 = 576 tokens[reference:8], M³ creates 5 nested sets via
+            <strong>2×2 average pooling with stride 2</strong>:
+        </p>
+        <ul>
+            <li><strong>S₁ = 1</strong> (3×3 pooling on the 3×3 grid)[reference:9]</li>
+            <li><strong>S₂ = 9</strong> (3×3 grid)[reference:10]</li>
+            <li><strong>S₃ = 36</strong> (6×6 grid)[reference:11]</li>
+            <li><strong>S₄ = 144</strong> (12×12 grid)[reference:12]</li>
+            <li><strong>S₅ = 576</strong> (24×24 full grid)[reference:13]</li>
+        </ul>
+        <p>
+            Crucially, <span class="citation">X_{S_i} ⊂ X_{S_{i+1}}</span> — the coarser tokens are derived
+            <em>directly</em> from the finer ones[reference:14]. This nesting is <strong>not</strong> achieved by adding
+            new parameters, but by <em>optimizing the CLIP visual encoder</em> to learn this hierarchical
+            structure[reference:15].
+        </p>
+
+        <h3>2.2 Training Objective</h3>
+        <p>
+            M³ fine-tunes the <em>entire</em> LMM (CLIP encoder + LLM) using the standard next-token prediction loss,
+            <strong>averaged over all M scales</strong>[reference:16]:
+        </p>
+        <div class="code-block">
+            <span class="comment"># M³ training objective</span>
+            min_θ (1/M) Σ_{i=1}^{M} -log P( X_a | X_{S_i}, X_q )
+        </div>
+        <p>
+            where <em>X<sub>S_i</sub></em> is the visual token set at scale <em>i</em>, <em>X<sub>q</sub></em> is the
+            question, and <em>X<sub>a</sub></em> is the answer[reference:17].
+        </p>
+        <p>
+            This forces the model to learn to answer questions correctly using <strong>any</strong> of the 5 token
+            scales — from a single token to all 576.
+        </p>
+
+        <h3>2.3 Inference — Adaptive Granularity</h3>
+        <p>
+            At test time, users can <strong>explicitly control</strong> the number of visual tokens[reference:18]:
+        </p>
+        <ul>
+            <li>Use <strong>all 576 tokens</strong> for dense, high-detail images (e.g., documents, OCR).</li>
+            <li>Use <strong>9 or even 1 token</strong> for simple, natural scenes — achieving <strong>64× fewer
+                    tokens</strong> with minimal accuracy loss[reference:19].</li>
+        </ul>
+        <p>
+            For videos, this is even more powerful: with a fixed budget of 2880 tokens, you could represent <strong>2880
+                frames with 1 token each</strong>, or <strong>5 frames with 576 tokens each</strong> — M³ gives you the
+            flexibility to choose[reference:20].
+        </p>
+
+        <!-- ========================================================= -->
+        <h2>3. Data &amp; Experimental Setup</h2>
+
+        <h3>3.1 Base Models</h3>
+        <ul>
+            <li><strong>LLaVA-1.5</strong> (Vicuna 7B)[reference:21]</li>
+            <li><strong>LLaVA-NeXT</strong> (Vicuna 7B)[reference:22]</li>
+        </ul>
+
+        <h3>3.2 Training Details</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Parameter</th>
+                    <th>Value</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Visual encoder</td>
+                    <td>CLIP-ViT-L-336 (frozen then fine-tuned)[reference:23]</td>
+                </tr>
+                <tr>
+                    <td>LLM learning rate (LLaVA-1.5)</td>
+                    <td>2×10⁻⁵[reference:24]</td>
+                </tr>
+                <tr>
+                    <td>LLM learning rate (LLaVA-NeXT)</td>
+                    <td>1×10⁻⁵[reference:25]</td>
+                </tr>
+                <tr>
+                    <td>Visual encoder LR</td>
+                    <td>2×10⁻⁵[reference:26]</td>
+                </tr>
+                <tr>
+                    <td>Epochs</td>
+                    <td>1[reference:27]</td>
+                </tr>
+                <tr>
+                    <td>GPUs</td>
+                    <td>8× NVIDIA H100[reference:28]</td>
+                </tr>
+                <tr>
+                    <td>Token scales M</td>
+                    <td>{1, 9, 36, 144, 576}[reference:29]</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>3.3 Evaluation Benchmarks</h3>
+        <ul>
+            <li><strong>Image</strong>: POPE, GQA, MMBench, VizWiz, SEEDBench, ScienceQA, MMMU[reference:30]</li>
+            <li><strong>Document/OCR</strong>: DocVQA, ChartQA, AI2D, TextVQA[reference:31]</li>
+            <li><strong>Video</strong>: MSVD-QA, MSRVTT-QA, ActivityNet-QA, NExT-QA, IntentQA, EgoSchema[reference:32]
+            </li>
+        </ul>
+
+        <!-- ========================================================= -->
+        <h2>4. Key Results</h2>
+
+        <h3>4.1 Image Understanding — Strong Performance with Few Tokens</h3>
+        <p>
+            LLaVA-1.5-M³ with <strong>9 tokens</strong> surpasses Qwen-VL-Chat (which uses 256 tokens) on
+            MMBench[reference:33]. With <strong>1 token</strong>, it achieves similar performance to
+            Qwen-VL-Chat[reference:34]. It also beats InstructBLIP-7B and -13B across all benchmarks[reference:35].
+        </p>
+
+        <h3>4.2 Granularity Analysis — Which Tasks Need How Many Tokens?</h3>
+        <p>
+            M³ serves as a <strong>framework to analyse dataset complexity</strong>[reference:36]:
+        </p>
+        <ul>
+            <li><strong>Natural scenes (COCO-style)</strong>: ~9 tokens suffice[reference:37].</li>
+            <li><strong>Document understanding / OCR</strong>: need 144–576 tokens[reference:38].</li>
+            <li><strong>ScienceQA</strong>: consistent performance across <em>all</em> scales[reference:39].</li>
+        </ul>
+
+        <h3>4.3 Video Understanding — Full Tokens Can Hurt</h3>
+        <p>
+            On 4 out of 6 video benchmarks, <strong>full visual tokens (2880) performed worse</strong> than 720 or 180
+            tokens[reference:40]. The authors suspect that <span class="citation">very long visual context brings
+                distraction</span> — too much focus on irrelevant background[reference:41].
+        </p>
+        <p>
+            With just <strong>9 tokens per frame (45 total)</strong>, M³ achieves accuracy within <strong>1%</strong> of
+            the full 2880-token version on ActivityNet, IntentQA, and EgoSchema[reference:42].
+        </p>
+
+        <h3>4.4 The Oracle Gap — Huge Room for Improvement</h3>
+        <p>
+            The paper computes an <strong>oracle upper bound</strong>: for each test sample, what's the best token
+            scale? The oracle uses <strong>as few as 8.9 tokens on average</strong> to achieve <strong>8% higher
+                accuracy</strong> than LLaVA-NeXT with 576 tokens[reference:43]. This reveals a <span
+                class="citation">large gap</span> between current fixed-scale representations and what's theoretically
+            possible[reference:44].
+        </p>
+
+        <!-- ========================================================= -->
+        <h2>5. Parameter Tuning Guide</h2>
+
+        <h3>5.1 Token Scales M</h3>
+        <ul>
+            <li><strong>Default</strong>: {1, 9, 36, 144, 576} for CLIP-ViT-L-336[reference:45].</li>
+            <li><strong>Adjustment</strong>: For higher-resolution encoders (e.g., 448×448 → 32×32 = 1024 tokens), use
+                {1, 4, 16, 64, 256, 1024}.</li>
+            <li><strong>Principle</strong>: scales should follow a <strong>consistent halving (or quartering)</strong>
+                pattern to maintain nesting[reference:46].</li>
+        </ul>
+
+        <h3>5.2 Pooling Strategy</h3>
+        <ul>
+            <li><strong>Average pooling</strong> works best[reference:47].</li>
+            <li>Spatial sampling and sequential sampling perform worse — <span class="citation">sequential sampling does
+                    not align with spatial distribution</span>[reference:48].</li>
+        </ul>
+
+        <h3>5.3 Training Strategy</h3>
+        <ul>
+            <li><strong>Initialize LLM from LLaVA</strong> (not from scratch) — makes training more
+                stable[reference:49].</li>
+            <li><strong>Average loss over all scales</strong> — forces the model to learn nested behavior[reference:50].
+            </li>
+            <li><strong>Fine-tune the whole model</strong> (CLIP + LLM) — training only CLIP is
+                insufficient[reference:51].</li>
+        </ul>
+
+        <h3>5.4 Inference-Time Choices</h3>
+        <ul>
+            <li><strong>For simple natural images</strong>: use 9 or even 1 token.</li>
+            <li><strong>For OCR/documents</strong>: use 144–576 tokens.</li>
+            <li><strong>For videos</strong>: experiment with 9–180 tokens per frame — full tokens often
+                hurt[reference:52].</li>
+            <li><strong>Zero-shot longer sequences</strong>: M³ generalises to 2×2 image grids with 144 tokens per grid
+                (1440 total) — matching the performance of 3×3 grids with 576 tokens per grid (2880
+                total)[reference:53].</li>
+        </ul>
+
+        <!-- ========================================================= -->
+        <h2>6. Full Implementation (PyTorch Skeleton)</h2>
+
+        <div class="code-block">
+            <span class="comment">"""
+                M³: Matryoshka Multimodal Models
+                Based on LLaVA-1.5 / LLaVA-NeXT with CLIP-ViT-L-336.
+                """</span>
+
+            <span class="keyword">import</span> torch
+            <span class="keyword">import</span> torch.nn <span class="keyword">as</span> nn
+            <span class="keyword">import</span> torch.nn.functional <span class="keyword">as</span> F
+
+            <span class="comment"># ---------- 1. Nested token extraction (pooling) ----------</span>
+            <span class="keyword">def</span> <span class="func">get_matryoshka_tokens</span>(visual_tokens, scales=[1,
+            9, 36, 144, 576]):
+            <span class="comment">"""
+                visual_tokens: [B, 576, C] from CLIP ViT-L-336 (24x24 grid)
+                returns: list of [B, s, C] for s in scales
+                """</span>
+            B, T, C = visual_tokens.shape
+            H = W = <span class="keyword">int</span>(T ** 0.5) <span class="comment"># 24</span>
+            tokens = visual_tokens.view(B, H, W, C).permute(0, 3, 1, 2) <span class="comment"># [B, C, H, W]</span>
+
+            nested = []
+            <span class="comment"># Scale 576: no pooling</span>
+            nested.append(visual_tokens) <span class="comment"># [B, 576, C]</span>
+
+            <span class="comment"># Scale 144: 2x2 pooling</span>
+            pool_144 = F.avg_pool2d(tokens, kernel_size=2, stride=2) <span class="comment"># [B, C, 12, 12]</span>
+            nested.append(pool_144.flatten(2).permute(0, 2, 1)) <span class="comment"># [B, 144, C]</span>
+
+            <span class="comment"># Scale 36: 4x4 pooling</span>
+            pool_36 = F.avg_pool2d(tokens, kernel_size=4, stride=4) <span class="comment"># [B, C, 6, 6]</span>
+            nested.append(pool_36.flatten(2).permute(0, 2, 1)) <span class="comment"># [B, 36, C]</span>
+
+            <span class="comment"># Scale 9: 8x8 pooling</span>
+            pool_9 = F.avg_pool2d(tokens, kernel_size=8, stride=8) <span class="comment"># [B, C, 3, 3]</span>
+            nested.append(pool_9.flatten(2).permute(0, 2, 1)) <span class="comment"># [B, 9, C]</span>
+
+            <span class="comment"># Scale 1: 24x24 pooling (global avg)</span>
+            pool_1 = F.avg_pool2d(tokens, kernel_size=24, stride=24) <span class="comment"># [B, C, 1, 1]</span>
+            nested.append(pool_1.flatten(2).permute(0, 2, 1)) <span class="comment"># [B, 1, C]</span>
+
+            <span class="keyword">return</span> nested <span class="comment"># list of 5 tensors, from fine to
+                coarse</span>
+
+            <span class="comment"># ---------- 2. M³ Training Loop (conceptual) ----------</span>
+            <span class="keyword">class</span> <span class="func">M3Trainer</span>:
+            <span class="keyword">def</span> <span class="func">__init__</span>(self, model, tokenizer, scales=[1, 9,
+            36, 144, 576]):
+            self.model = model <span class="comment"># LLaVA-style LMM</span>
+            self.tokenizer = tokenizer
+            self.scales = scales
+
+            <span class="keyword">def</span> <span class="func">train_step</span>(self, images, questions, answers):
+            <span class="comment"># 1. Get visual tokens from CLIP encoder</span>
+            visual_tokens = self.model.visual_encoder(images) <span class="comment"># [B, 576, C]</span>
+
+            <span class="comment"># 2. Generate nested tokens via pooling</span>
+            nested_tokens = get_matryoshka_tokens(visual_tokens, self.scales)
+
+            <span class="comment"># 3. For each scale, compute next-token prediction loss</span>
+            total_loss = 0.0
+            <span class="keyword">for</span> tokens <span class="keyword">in</span> nested_tokens:
+            <span class="comment"># Concatenate visual tokens + question tokens</span>
+            input_embeds = self.model.<span class="func">prepare_inputs</span>(tokens, questions)
+            <span class="comment"># Forward pass through LLM</span>
+            logits = self.model.llm(input_embeds)
+            <span class="comment"># Compute cross-entropy loss on answer tokens</span>
+            loss = F.cross_entropy(logits, answers)
+            total_loss += loss
+
+            <span class="comment"># Average over all scales</span>
+            total_loss = total_loss / len(self.scales)
+            total_loss.backward()
+            <span class="keyword">return</span> total_loss.item()
+
+            <span class="comment"># ---------- 3. Inference: choose granularity ----------</span>
+            <span class="keyword">def</span> <span class="func">inference_with_granularity</span>(model, image,
+            question, target_scale):
+            <span class="comment">"""
+                target_scale: 1, 9, 36, 144, or 576
+                """</span>
+            visual_tokens = model.visual_encoder(image) <span class="comment"># [576, C]</span>
+            <span class="comment"># Pool to target scale</span>
+            pooled = <span class="func">pool_to_scale</span>(visual_tokens, target_scale)
+            <span class="comment"># Feed to LLM with question</span>
+            response = model.generate(pooled, question)
+            <span class="keyword">return</span> response
+        </div>
+
+        <!-- ========================================================= -->
+        <h2>7. Subtle Parts &amp; Critical Analysis</h2>
+
+        <h3>7.1 No New Parameters — Pure Representation Learning</h3>
+        <p>
+            M³ introduces <strong>zero new learnable parameters</strong>[reference:54]. The nested structure is learned
+            <em>entirely</em> through the training objective, by <span class="citation">optimizing the CLIP visual
+                encoder to produce tokens that are poolable</span> without losing semantic information[reference:55].
+            This is a elegant demonstration of how <strong>representation learning objectives</strong> can induce
+            structured representations without architectural changes.
+        </p>
+
+        <h3>7.2 The Pooling Paradox</h3>
+        <p>
+            Why does average pooling work? The paper shows that <span class="citation">visual tokens have spatial
+                information</span>, and average pooling naturally preserves this[reference:56]. Sequential sampling,
+            which breaks spatial continuity, performs worst[reference:57]. This highlights an important lesson:
+            <strong>the inductive bias of the pooling operation matters</strong> — it's not just about reducing tokens,
+            but about <em>how</em> you reduce them.
+        </p>
+
+        <h3>7.3 Full Tokens Can Be Suboptimal</h3>
+        <p>
+            Counter-intuitively, using <strong>all</strong> visual tokens often <em>hurts</em> performance, especially
+            in video[reference:58]. The authors hypothesise that <span class="citation">very long visual context brings
+                distraction</span>[reference:59]. This is a crucial insight for system design: <strong>more is not
+                always better</strong>. The optimal token count depends on the task and the image content.
+        </p>
+
+        <h3>7.4 The Oracle Gap — A Call to Action</h3>
+        <p>
+            The oracle experiment (8.9 tokens on average → 8% better than full 576 tokens[reference:60]) reveals that
+            <strong>current LMMs are far from optimal</strong> in how they use visual tokens. This opens up exciting
+            research directions:
+        </p>
+        <ul>
+            <li><strong>Dynamic token allocation</strong> — learn to predict the optimal number of tokens per
+                sample[reference:61].</li>
+            <li><strong>Content-aware pooling</strong> — not all regions need the same token density.</li>
+            <li><strong>Task-conditioned granularity</strong> — the optimal scale depends on the question[reference:62].
+            </li>
+        </ul>
+
+        <h3>7.5 Connection to MRL and CSR — A Unified View</h3>
+        <div class="comparison-box">
+            <strong>🔗 The Matryoshka Family Tree:</strong>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Method</th>
+                        <th>What is Nested?</th>
+                        <th>Dimension</th>
+                        <th>Control Knob</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>MRL</strong> (Kusupati et al.)</td>
+                        <td>Feature vector prefixes</td>
+                        <td>Embedding size (d)</td>
+                        <td>Number of dimensions</td>
+                    </tr>
+                    <tr>
+                        <td><strong>CSR</strong> (Wen et al.)</td>
+                        <td>Sparse activations</td>
+                        <td>Active neurons (k)</td>
+                        <td>Sparsity level</td>
+                    </tr>
+                    <tr>
+                        <td><strong>M³</strong> (this paper)</td>
+                        <td>Visual token sets</td>
+                        <td>Sequence length (L)</td>
+                        <td>Number of tokens</td>
+                    </tr>
+                </tbody>
+            </table>
+            <p style="margin-top:0.8rem;">
+                All three share the same high-level goal: <strong>one model, multiple operating points</strong>,
+                enabling <span class="citation">explicit control over the trade-off between information density and
+                    efficiency</span>[reference:63].
+            </p>
+        </div>
+
+        <!-- ========================================================= -->
+        <h2>8. Summary &amp; Engineering Perspective</h2>
+
+        <div class="highlight-box">
+            <p style="margin-bottom:0;">
+                <strong>Matryoshka Multimodal Models (M³)</strong> bring the Matryoshka philosophy to the <strong>token
+                    sequence dimension</strong> of Large Multimodal Models. From an engineering standpoint:
+            <ul>
+                <li><strong>Zero new parameters</strong> — the nested structure is learned via training, not
+                    architectural changes.</li>
+                <li><strong>Inference-time flexibility</strong> — choose 1, 9, 36, 144, or 576 tokens per image, with
+                    <strong>no retraining</strong>.</li>
+                <li><strong>Surprising efficiency</strong> — many benchmarks work well with <strong>9 tokens</strong>,
+                    and full tokens can even <em>hurt</em> performance.</li>
+                <li><strong>Oracle gap</strong> — there's massive room for improvement in adaptive token allocation.
+                </li>
+            </ul>
+            For production LMMs, M³ offers a practical way to <strong>dynamically adjust inference cost</strong> based
+            on content complexity and latency constraints — a capability that MRL and CSR provide for embedding and
+            retrieval systems, now extended to multimodal generation.
+            </p>
+        </div>
+
+        <div class="footnote">
+            📄 Based on arXiv:2405.17430 (Cai et al.) · All citations refer to the original paper.
+        </div>
+
+    </div>
+</body>
+
+</html>

@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Matryoshka Representation Learning (MRL) — Deep Dive & Implementation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #f6f8fa;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            color: #1e293b;
+            line-height: 1.7;
+            padding: 2rem 1.5rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #ffffff;
+            border-radius: 24px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.06);
+            padding: 2.5rem 3rem;
+        }
+
+        h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, #0f172a, #3b82f6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 0.25rem;
+        }
+
+        .subtitle {
+            font-size: 1.05rem;
+            color: #64748b;
+            border-left: 4px solid #3b82f6;
+            padding-left: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        h2 {
+            font-size: 1.7rem;
+            font-weight: 600;
+            margin-top: 2.8rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.4rem;
+            border-bottom: 2px solid #e9edf2;
+            color: #0f172a;
+        }
+
+        h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 2rem;
+            margin-bottom: 0.8rem;
+            color: #1e293b;
+        }
+
+        h4 {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+            color: #334155;
+        }
+
+        p {
+            margin-bottom: 1rem;
+            color: #334155;
+        }
+
+        ul,
+        ol {
+            margin: 0.5rem 0 1.2rem 1.8rem;
+        }
+
+        li {
+            margin-bottom: 0.4rem;
+        }
+
+        .highlight-box {
+            background: #f1f5f9;
+            border-radius: 14px;
+            padding: 1.5rem 2rem;
+            margin: 1.8rem 0;
+            border-left: 6px solid #3b82f6;
+        }
+
+        .highlight-box strong {
+            color: #0f172a;
+        }
+
+        .code-block {
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 14px;
+            padding: 1.5rem 1.8rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+            font-family: "JetBrains Mono", "Fira Code", monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+
+        .code-block .comment {
+            color: #94a3b8;
+        }
+
+        .code-block .keyword {
+            color: #f472b6;
+        }
+
+        .code-block .func {
+            color: #60a5fa;
+        }
+
+        .code-block .string {
+            color: #34d399;
+        }
+
+        .code-block .number {
+            color: #fbbf24;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            font-size: 0.95rem;
+        }
+
+        th,
+        td {
+            padding: 0.7rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid #e9edf2;
+        }
+
+        th {
+            background: #f1f5f9;
+            font-weight: 600;
+            color: #0f172a;
+        }
+
+        tr:hover {
+            background: #f8fafc;
+        }
+
+        .tag {
+            display: inline-block;
+            background: #dbeafe;
+            color: #1d4ed8;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.2rem 0.7rem;
+            border-radius: 20px;
+            margin-right: 0.3rem;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin: 1.2rem 0;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1.5rem;
+            }
+
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            .grid-2 {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .footnote {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            margin-top: 2rem;
+            border-top: 1px solid #e9edf2;
+            padding-top: 1.5rem;
+        }
+
+        .citation {
+            background: #fefce8;
+            border-radius: 8px;
+            padding: 0.1rem 0.4rem;
+            font-size: 0.85rem;
+            color: #a16207;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+
+        <h1>🧸 Matryoshka Representation Learning</h1>
+        <div class="subtitle">
+            Deep Dive · Core Ideas · Full Implementation · Experiments &amp; Tuning
+            <span style="display:inline-block;margin-left:1.5rem;font-size:0.85rem;color:#94a3b8;">
+                arXiv:2205.13147 &nbsp;|&nbsp; Kusupati et al.
+            </span>
+        </div>
+
+        <!-- ========================================================= -->
+        <h2>1. Core Idea — Nested Elastic Representations</h2>
+
+        <p>
+            Modern ML systems typically use fixed‑dimensional representation vectors (e.g., 2048‑D from ResNet50) for
+            all downstream tasks.
+            However, different tasks have different compute and accuracy requirements — high‑dim representations waste
+            resources on small tasks, while low‑dim ones hurt accuracy on complex tasks.
+            <strong>Matryoshka Representation Learning (MRL)</strong> introduces a simple yet powerful solution:
+            <strong>encode multiple nested sub‑vectors of different sizes within a single high‑dimensional
+                vector</strong> such that <span class="citation">the first m dimensions (m ∈ [d]) form a standalone,
+                high‑quality representation for any m</span>.
+        </p>
+
+        <div class="highlight-box">
+            <strong>💡 Key insight:</strong>
+            Traditional approaches need to train separate models or apply post‑hoc dimensionality reduction.
+            MRL explicitly optimizes <strong>O(log d) nested dimensions</strong> (e.g., 8, 16, 32, …, 2048) with shared
+            backbone,
+            enabling a single model to produce coarse‑to‑fine representations <strong>at zero extra inference
+                cost</strong>.
+        </div>
+
+        <p>
+            The core MRL objective — multi‑scale classification loss:
+        </p>
+        <div class="code-block">
+            <span class="comment">// For each nested dimension m ∈ M, use an independent linear classifier</span>
+            min<span class="func" style="color:#f472b6;">_{ {W^(m)}, θ_F }</span> (1/N) Σ_i Σ_{m∈M} c_m · <span
+                class="func">Loss</span>( W^(m) · F(x_i; θ_F)<sub style="color:#94a3b8;">1:m</sub> , y_i )
+        </div>
+        <p>
+            where <strong>M = {8, 16, 32, 64, 128, 256, 512, 1024, 2048}</strong> (ResNet50 setting),
+            and c<sub>m</sub> = 1 by default.
+            All nested classifiers share the <strong>same backbone F(·; θ<sub>F</sub>)</strong>,
+            so training cost is only slightly higher than a single task (O(log d) extra classifier forward/backward
+            passes).
+        </p>
+
+        <!-- ========================================================= -->
+        <h2>2. Data &amp; Experimental Setup</h2>
+
+        <h3>2.1 Datasets</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Dataset</th>
+                    <th>Size</th>
+                    <th>Purpose</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>ImageNet-1K</strong></td>
+                    <td>1.28M train / 50K val / 1000 classes</td>
+                    <td>Supervised learning, retrieval benchmark</td>
+                </tr>
+                <tr>
+                    <td><strong>ImageNet-4K</strong></td>
+                    <td>~4.2M database / ~200K queries / 4202 classes</td>
+                    <td>Large‑scale retrieval</td>
+                </tr>
+                <tr>
+                    <td><strong>JFT-300M</strong></td>
+                    <td>300 million images</td>
+                    <td>Web‑scale pre‑training</td>
+                </tr>
+                <tr>
+                    <td><strong>ALIGN data</strong></td>
+                    <td>1 billion image‑text pairs</td>
+                    <td>Vision‑language contrastive learning</td>
+                </tr>
+                <tr>
+                    <td><strong>Wikipedia + BooksCorpus</strong></td>
+                    <td>~16GB text</td>
+                    <td>BERT masked language modelling</td>
+                </tr>
+            </tbody>
+        </table>
+        <p>
+            The paper also evaluates on <strong>ImageNetV2 / R / A / Sketch</strong> for OOD robustness.
+        </p>
+
+        <h3>2.2 Model Architectures &amp; Nested Dimensions</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th>Output dim d</th>
+                    <th>Nested dimensions M</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>ResNet50</td>
+                    <td>2048</td>
+                    <td>{8,16,32,64,128,256,512,1024,2048}</td>
+                </tr>
+                <tr>
+                    <td>ViT-B/16</td>
+                    <td>768</td>
+                    <td>{12,24,48,96,192,384,768}</td>
+                </tr>
+                <tr>
+                    <td>BERT-Base</td>
+                    <td>768</td>
+                    <td>{12,24,48,96,192,384,768}</td>
+                </tr>
+                <tr>
+                    <td>ALIGN (ViT + BERT)</td>
+                    <td>—</td>
+                    <td>Same as ViT/BERT</td>
+                </tr>
+            </tbody>
+        </table>
+        <p>
+            <span class="citation">M size ≤ ⌊log₂(d)⌋, usually using consistent halving until the information bottleneck
+                is reached</span>.
+        </p>
+
+        <!-- ========================================================= -->
+        <h2>3. Implementation Details — Building MRL from Scratch</h2>
+
+        <h3>3.1 Standard MRL (multi‑classifier version)</h3>
+        <div class="code-block">
+            <span class="comment"># PyTorch‑style pseudocode</span>
+            <span class="keyword">import</span> torch
+            <span class="keyword">import</span> torch.nn <span class="keyword">as</span> nn
+
+            <span class="keyword">class</span> <span class="func">MRLModel</span>(nn.Module):
+            <span class="keyword">def</span> <span class="func">__init__</span>(self, backbone, d, M, num_classes):
+            super().__init__()
+            self.backbone = backbone <span class="comment"># ResNet50 / ViT etc.</span>
+            self.M = M <span class="comment"># list of nested dims, e.g. [8,16,...,2048]</span>
+            <span class="comment"># Create independent linear classifiers for each nested dim</span>
+            self.classifiers = nn.ModuleList([
+            nn.Linear(m, num_classes) <span class="keyword">for</span> m <span class="keyword">in</span> M
+            ])
+
+            <span class="keyword">def</span> <span class="func">forward</span>(self, x):
+            z = self.backbone(x) <span class="comment"># full d‑dimensional representation</span>
+            outputs = []
+            <span class="keyword">for</span> m, clf <span class="keyword">in</span> <span
+                class="func">zip</span>(self.M, self.classifiers):
+            z_m = z[:, :m] <span class="comment"># take first m dimensions</span>
+            logits = clf(z_m)
+            outputs.append(logits)
+            <span class="keyword">return</span> outputs <span class="comment"># list of logits of length |M|</span>
+        </div>
+
+        <h3>3.2 Efficient MRL (MRL‑E, weight tying)</h3>
+        <p>
+            When the output space is huge (e.g., JFT‑300M has 30K classes), maintaining independent classifiers for
+            every nested dimension consumes too much memory.
+            MRL‑E solves this with <strong>weight tying</strong>:
+            use a single shared weight matrix <strong>W ∈ ℝ<sup>L×d</sup></strong>, and the classifier for dimension m
+            is <strong>W<sub>:,1:m</sub></strong>.
+        </p>
+        <div class="code-block">
+            <span class="comment"># MRL‑E: shared classifier weights</span>
+            <span class="keyword">class</span> <span class="func">MRLEModel</span>(nn.Module):
+            <span class="keyword">def</span> <span class="func">__init__</span>(self, backbone, d, M, num_classes):
+            super().__init__()
+            self.backbone = backbone
+            self.M = M
+            self.shared_weight = nn.Linear(d, num_classes, bias=<span class="keyword">False</span>) <span
+                class="comment"># W ∈ R^{L×d}</span>
+
+            <span class="keyword">def</span> <span class="func">forward</span>(self, x):
+            z = self.backbone(x)
+            outputs = []
+            <span class="keyword">for</span> m <span class="keyword">in</span> self.M:
+            z_m = z[:, :m]
+            <span class="comment"># use only the first m columns of the shared weight</span>
+            logits = z_m @ self.shared_weight.weight[:, :m].T
+            outputs.append(logits)
+            <span class="keyword">return</span> outputs
+        </div>
+
+        <h3>3.3 Training Loop</h3>
+        <div class="code-block">
+            <span class="comment"># Training an MRL model</span>
+            model = MRLModel(backbone=resnet50, d=2048, M=[8,16,32,64,128,256,512,1024,2048], num_classes=1000)
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
+
+            <span class="keyword">for</span> epoch <span class="keyword">in</span> range(epochs):
+            <span class="keyword">for</span> x, y <span class="keyword">in</span> dataloader:
+            logits_list = model(x) <span class="comment"># all nested logits</span>
+            loss = 0.0
+            <span class="keyword">for</span> logits <span class="keyword">in</span> logits_list:
+            loss += nn.CrossEntropyLoss()(logits, y) <span class="comment"># c_m = 1</span>
+            loss.backward()
+            optimizer.step()
+        </div>
+
+        <h3>3.4 Contrastive Learning (ALIGN‑style) Adaptation</h3>
+        <p>
+            For contrastive learning (e.g., ALIGN), MRL is applied to <strong>both encoders (image &amp; text)</strong>.
+            Each nested dimension is independently L2‑normalised before computing the contrastive loss.
+        </p>
+
+        <!-- ========================================================= -->
+        <h2>4. Experimental Settings &amp; Key Results</h2>
+
+        <h3>4.1 Representation Quality Evaluation</h3>
+        <ul>
+            <li><strong>Linear probe</strong>: freeze backbone, train a linear classifier on each nested dimension.</li>
+            <li><strong>1‑Nearest Neighbour</strong>: use training set as database, validation as queries, with L2
+                distance.</li>
+        </ul>
+        <p>
+            <span class="citation">On ImageNet‑1K, MRL outperforms independently trained fixed‑feature (FF) models by
+                &gt;2% at low dimensions (≤128), and matches at high dimensions</span>.
+            For <strong>ViT‑B/16 + JFT‑300M</strong> and <strong>ALIGN</strong> (web‑scale), MRL consistently delivers
+            strong multi‑granularity performance.
+        </p>
+
+        <h3>4.2 Adaptive Classification</h3>
+        <p>
+            Leveraging the nested structure, MRL enables <strong>model cascades</strong>:
+            learn a <strong>confidence threshold (max softmax probability)</strong> for each nested classifier on the
+            validation set.
+            During inference, start with the smallest dimension and escalate only when confidence is low.
+        </p>
+        <div class="highlight-box">
+            <strong>📊 Result:</strong>
+            On ImageNet‑1K, MRL cascade (MRL‑AC) achieves 76.30% accuracy while using <strong>only ~37 dimensions on
+                average</strong>,
+            whereas a fixed‑feature model would require 512 dimensions for the same accuracy — a <strong>14×
+                reduction</strong>.
+        </div>
+
+        <h3>4.3 Adaptive Retrieval</h3>
+        <p>
+            A two‑step retrieval pipeline:<br />
+            ① <strong>Shortlist</strong>: use low‑dim representation (e.g., 16‑D) to quickly retrieve K candidates
+            (K=200);<br />
+            ② <strong>Re‑rank</strong>: use high‑dim representation (e.g., 2048‑D) to accurately order the shortlist.
+        </p>
+        <div class="highlight-box">
+            <strong>📊 Result:</strong>
+            On ImageNet‑1K, MRL adaptive retrieval (D<sub>s</sub>=16, D<sub>r</sub>=2048) <strong>matches the accuracy
+                of a single 2048‑D retrieval</strong>,
+            with <strong>128× theoretical compute reduction</strong> and <strong>14× wall‑clock speedup</strong>.
+            The paper also introduces <strong>Funnel Retrieval</strong> — a multi‑level shortlist‑rerank scheme.
+        </div>
+
+        <h3>4.4 Robustness &amp; Long‑tail Learning</h3>
+        <ul>
+            <li><strong>OOD robustness</strong>: MRL matches or slightly outperforms FF baselines on
+                ImageNetV2/R/A/Sketch.</li>
+            <li><strong>Long‑tail classification</strong>: MRL beats FF by <strong>2%</strong> in few‑shot accuracy on
+                low‑dim representations.</li>
+        </ul>
+
+        <!-- ========================================================= -->
+        <h2>5. Parameter Tuning Guide</h2>
+
+        <h3>5.1 Choice of Nested Dimensions M</h3>
+        <ul>
+            <li><strong>Principle</strong>: <span class="citation">|M| ≤ ⌊log₂(d)⌋, typically using consistent
+                    halving</span>.</li>
+            <li><strong>Default</strong>: ResNet50 (d=2048) → M = {8, 16, 32, 64, 128, 256, 512, 1024, 2048}.</li>
+            <li><strong>Tuning</strong>: If extremely low dimensions (e.g., 4) are needed, extend M to {4,8,…}; for
+                extreme efficiency, reduce the number of points (e.g., every 4× step).</li>
+        </ul>
+
+        <h3>5.2 Loss Weights c<sub>m</sub></h3>
+        <p>
+            The paper sets <span class="citation">all c<sub>m</sub> = 1</span> without extra weighting.
+            If certain dimensions are more important for your downstream tasks, you can increase their weights (e.g.,
+            c<sub>low</sub> &gt; c<sub>high</sub> to boost low‑dim quality).
+        </p>
+
+        <h3>5.3 Training Hyperparameters</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Hyperparameter</th>
+                    <th>ResNet50 / ImageNet‑1K</th>
+                    <th>ViT / JFT‑300M</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Optimizer</td>
+                    <td>SGD (momentum=0.9)</td>
+                    <td>Adam</td>
+                </tr>
+                <tr>
+                    <td>Initial LR</td>
+                    <td>0.1</td>
+                    <td>0.001</td>
+                </tr>
+                <tr>
+                    <td>LR schedule</td>
+                    <td>Cosine or Step (30/60/90)</td>
+                    <td>Cosine</td>
+                </tr>
+                <tr>
+                    <td>Weight decay</td>
+                    <td>1e‑4</td>
+                    <td>0.1</td>
+                </tr>
+                <tr>
+                    <td>Batch size</td>
+                    <td>256 / 1024</td>
+                    <td>4096</td>
+                </tr>
+                <tr>
+                    <td>Epochs</td>
+                    <td>90 / 200</td>
+                    <td>—</td>
+                </tr>
+            </tbody>
+        </table>
+        <p>
+            <span class="citation">MRL requires almost no extra tuning over the standard training pipeline; the gains
+                are robust</span>.
+        </p>
+
+        <h3>5.4 Adaptive Classification Thresholds</h3>
+        <ul>
+            <li><strong>Threshold learning</strong>: on the validation set, search for the best confidence threshold per
+                nested classifier (maximising accuracy or meeting a budget).</li>
+            <li><strong>Practical tip</strong>: use <strong>quantile</strong>‑based thresholds as a quick start, or
+                fine‑tune with grid search.</li>
+        </ul>
+
+        <h3>5.5 Adaptive Retrieval Parameters</h3>
+        <ul>
+            <li><strong>Shortlist size K</strong>: the paper uses K=200, and <span class="citation">increasing K gives
+                    only marginal gains</span>.</li>
+            <li><strong>Shortlist dimension D<sub>s</sub></strong>: 16‑D works well for ImageNet‑1K; ImageNet‑4K may
+                need 64‑D.</li>
+            <li><strong>Rerank dimension D<sub>r</sub></strong>: typically the full dimension d (e.g., 2048) for best
+                accuracy.</li>
+        </ul>
+
+        <!-- ========================================================= -->
+        <h2>6. Full Implementation (PyTorch Runnable Skeleton)</h2>
+
+        <div class="code-block">
+            <span class="comment">"""
+                MRL full training script (based on torchvision ResNet50 + ImageNet‑1K)
+                Paper setting: M = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+                """</span>
+
+            <span class="keyword">import</span> torch
+            <span class="keyword">import</span> torch.nn <span class="keyword">as</span> nn
+            <span class="keyword">import</span> torch.optim <span class="keyword">as</span> optim
+            <span class="keyword">from</span> torchvision <span class="keyword">import</span> models, transforms,
+            datasets
+            <span class="keyword">from</span> torch.utils.data <span class="keyword">import</span> DataLoader
+
+            <span class="comment"># ---------- 1. Define MRL model ----------</span>
+            <span class="keyword">class</span> <span class="func">MRLResNet</span>(nn.Module):
+            <span class="keyword">def</span> <span class="func">__init__</span>(self, M, num_classes=1000,
+            pretrained=<span class="keyword">False</span>):
+            super().__init__()
+            self.backbone = models.resnet50(pretrained=pretrained)
+            <span class="comment"># remove original classification head, get feature dim 2048</span>
+            self.d = self.backbone.fc.in_features
+            self.backbone.fc = nn.Identity()
+            self.M = M
+            self.classifiers = nn.ModuleList([
+            nn.Linear(m, num_classes) <span class="keyword">for</span> m <span class="keyword">in</span> M
+            ])
+
+            <span class="keyword">def</span> <span class="func">forward</span>(self, x):
+            z = self.backbone(x) <span class="comment"># [B, 2048]</span>
+            outputs = []
+            <span class="keyword">for</span> m, clf <span class="keyword">in</span> <span
+                class="func">zip</span>(self.M, self.classifiers):
+            outputs.append(clf(z[:, :m]))
+            <span class="keyword">return</span> outputs
+
+            <span class="comment"># ---------- 2. Data loading ----------</span>
+            transform = transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            train_dataset = datasets.ImageFolder(<span class="string">'/path/to/imagenet/train'</span>,
+            transform=transform)
+            train_loader = DataLoader(train_dataset, batch_size=256, shuffle=<span class="keyword">True</span>,
+            num_workers=8)
+
+            <span class="comment"># ---------- 3. Init model &amp; optimizer ----------</span>
+            M = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+            model = MRLResNet(M, num_classes=1000).cuda()
+            optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=90)
+            criterion = nn.CrossEntropyLoss()
+
+            <span class="comment"># ---------- 4. Training loop ----------</span>
+            <span class="keyword">for</span> epoch <span class="keyword">in</span> range(90):
+            model.train()
+            <span class="keyword">for</span> x, y <span class="keyword">in</span> train_loader:
+            x, y = x.cuda(), y.cuda()
+            optimizer.zero_grad()
+            logits_list = model(x)
+            loss = <span class="func">sum</span>(criterion(logits, y) <span class="keyword">for</span> logits <span
+                class="keyword">in</span> logits_list) <span class="comment"># c_m = 1</span>
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            <span class="func">print</span>(<span class="string">f"Epoch {epoch+1} done"</span>)
+
+            <span class="comment"># ---------- 5. Inference: get representation at any dimension ----------</span>
+            model.eval()
+            <span class="keyword">with</span> torch.no_grad():
+            z = model.backbone(x) <span class="comment"># full 2048‑D</span>
+            z_16 = z[:, :16] <span class="comment"># first 16 dims → low‑dim representation</span>
+            z_128 = z[:, :128] <span class="comment"># first 128 dims</span>
+            <span class="comment"># These sub‑vectors can be used directly for downstream tasks</span>
+            <span class="comment"># with accuracy comparable to independently trained models.</span>
+        </div>
+
+        <!-- ========================================================= -->
+        <h2>7. Subtle Parts</h2>
+
+        <ul>
+            <li>
+                <strong>Information diffusion</strong>:
+                <span class="citation">Even though MRL explicitly optimises only O(log d) dimensions, intermediate
+                    dimensions (e.g., 384 between 256 and 512) show smooth interpolation in accuracy</span>.
+                This means in practice you can <strong>truncate at any arbitrary dimension</strong> without being
+                restricted to the values in M.
+            </li>
+            <li>
+                <strong>Gradient conflict</strong>: multiple classifiers share the backbone; low‑dim classifiers may
+                pull the high‑dim representations in different directions.
+                The paper finds that <strong>uniform weighting c<sub>m</sub>=1 works well</strong> and no severe
+                gradient conflict occurs.
+            </li>
+            <li>
+                <strong>Normalisation</strong>: For contrastive learning (ALIGN), <span class="citation">each nested
+                    dimension must be independently L2‑normalised</span> rather than normalising the full d‑dim vector
+                and then truncating, because truncation would break the norm information.
+            </li>
+            <li>
+                <strong>Difference from Slimmable Networks</strong>: Slimmable Networks maintain separate BN statistics
+                for each sub‑network and do not share weights across sub‑networks.
+                MRL's <strong>all nested dimensions share the same backbone</strong> and require <strong>only a single
+                    forward pass</strong> during inference, whereas Slimmable needs multiple passes.
+            </li>
+            <li>
+                <strong>MRL‑E weight tying</strong>: when the number of classes is huge (e.g., JFT's 30K), the memory
+                cost of independent classifiers becomes non‑negligible.
+                MRL‑E reduces this by almost half using the <strong>shared weight matrix W ∈ ℝ<sup>L×d</sup></strong>.
+            </li>
+        </ul>
+
+        <!-- ========================================================= -->
+        <h2>8. Summary</h2>
+
+        <div class="highlight-box">
+            <p style="margin-bottom:0;">
+                <strong>Matryoshka Representation Learning</strong> offers a <strong>“train once, adapt
+                    anywhere”</strong> paradigm for representation learning.
+                Through nested multi‑granularity optimisation, MRL achieves <strong>14× reduction</strong> in
+                classification dimension and <strong>128× theoretical retrieval speedup</strong> <strong>at no extra
+                    inference cost</strong>.
+                The method has been successfully applied to <strong>ResNet, ViT, ALIGN, BERT</strong> and covers vision,
+                language, and multi‑modal scenarios.
+                Code and pre‑trained models are open‑sourced:
+                <a href="https://github.com/RAIWllab/MRL" target="_blank"
+                    style="color:#3b82f6;">https://github.com/RAIWllab/MRL</a>
+            </p>
+        </div>
+
+        <div class="footnote">
+            📄 Based on arXiv:2205.13147 (Kusupati et al.) · All citations refer to the original paper.
+        </div>
+
+    </div>
+</body>
+
+</html>

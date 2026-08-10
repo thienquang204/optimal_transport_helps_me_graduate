@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GreenkhornMMPOT: Multi‑Marginal Partial Optimal Transport</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #f8f9fa;
+            color: #1a1a2e;
+            line-height: 1.7;
+            padding: 2rem 1rem;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: #ffffff;
+            padding: 2.5rem 3rem;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08);
+        }
+
+        h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+            color: #0a0a1a;
+            letter-spacing: -0.02em;
+            border-bottom: 4px solid #6c63ff;
+            padding-bottom: 0.75rem;
+        }
+
+        .subtitle {
+            font-size: 1.1rem;
+            color: #4a4a6a;
+            margin-bottom: 2rem;
+            font-weight: 400;
+        }
+
+        h2 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            margin-top: 2.5rem;
+            margin-bottom: 1rem;
+            color: #0a0a1a;
+            border-left: 6px solid #6c63ff;
+            padding-left: 1rem;
+        }
+
+        h3 {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-top: 1.8rem;
+            margin-bottom: 0.75rem;
+            color: #1a1a3e;
+        }
+
+        p {
+            margin-bottom: 1.25rem;
+            color: #2d2d44;
+        }
+
+        .highlight-box {
+            background: #f0f0ff;
+            border-left: 6px solid #6c63ff;
+            padding: 1.25rem 1.8rem;
+            border-radius: 8px;
+            margin: 1.5rem 0;
+        }
+
+        .highlight-box strong {
+            color: #3d3b8a;
+        }
+
+        ul,
+        ol {
+            margin: 1rem 0 1.5rem 2rem;
+        }
+
+        li {
+            margin-bottom: 0.5rem;
+            color: #2d2d44;
+        }
+
+        code {
+            background: #eef2f7;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+            font-size: 0.9rem;
+            color: #1e1e3f;
+        }
+
+        pre {
+            background: #0d1117;
+            color: #e6edf3;
+            padding: 1.5rem 2rem;
+            border-radius: 12px;
+            overflow-x: auto;
+            font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            margin: 1.5rem 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        pre code {
+            background: transparent;
+            padding: 0;
+            color: inherit;
+            font-size: 0.9rem;
+        }
+
+        .math {
+            background: #f7f9fc;
+            padding: 0.5rem 1.2rem;
+            border-radius: 6px;
+            font-family: 'Times New Roman', 'CMU Serif', serif;
+            font-size: 1.05rem;
+            overflow-x: auto;
+            margin: 0.75rem 0;
+            color: #1a1a2e;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            font-size: 0.95rem;
+        }
+
+        th {
+            background: #6c63ff;
+            color: white;
+            font-weight: 600;
+            padding: 0.8rem 1.2rem;
+            text-align: left;
+        }
+
+        td {
+            padding: 0.8rem 1.2rem;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        tr:nth-child(even) {
+            background: #f8f9fe;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #6c63ff;
+            color: white;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.2rem 0.8rem;
+            border-radius: 20px;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .footer {
+            margin-top: 3rem;
+            padding-top: 1.5rem;
+            border-top: 2px solid #eef2f7;
+            color: #6a6a8a;
+            font-size: 0.95rem;
+            text-align: center;
+        }
+
+        @media (max-width: 700px) {
+            .container {
+                padding: 1.5rem 1.2rem;
+            }
+
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            h2 {
+                font-size: 1.4rem;
+            }
+
+            pre {
+                padding: 1rem 1.2rem;
+                font-size: 0.8rem;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+
+        <h1>GreenkhornMMPOT</h1>
+        <div class="subtitle">Multi‑Marginal Partial Optimal Transport via Sinkhorn Rescaling</div>
+        <p>A <strong>differentiable</strong>, <strong>Sinkhorn‑style</strong> algorithm for Entropic Multi‑Marginal
+            Partial Optimal Transport (MMPOT). Designed for deep learning pipelines where the cost tensor is
+            parameterized by a neural network.</p>
+
+        <!-- ============ WHY MMPOT ============ -->
+        <h2>Why MMPOT?</h2>
+        <p>Traditional Optimal Transport (OT) enforces <strong>exact mass conservation</strong> – all mass must be
+            transported. <strong>Partial OT (POT)</strong> relaxes this constraint: only a fraction <em>s</em> of the
+            total mass is moved, the rest is discarded. <strong>Multi‑Marginal POT (MMPOT)</strong> handles <em>m</em> ≥
+            2 distributions simultaneously.</p>
+        <div class="highlight-box">
+            <strong>Previous approaches</strong> reduce MMPOT to standard OT by adding dummy points. This trick:
+            <ul>
+                <li>Produces <strong>infeasible</strong> solutions under entropy regularization,</li>
+                <li>Worsens the computational complexity to <code>𝒪(ε⁻⁴)</code>,</li>
+                <li>Lacks a clean, differentiable structure.</li>
+            </ul>
+        </div>
+        <p><strong>Our approach</strong> uses a <strong>primal‑dual formulation</strong> with explicit slack variables,
+            leading to a <strong>pure multiplicative rescaling</strong> scheme – exactly the same flavour as Sinkhorn –
+            that is:</p>
+        <ul>
+            <li><strong>Feasible</strong> at every iteration (one constraint is exactly satisfied after each step),</li>
+            <li><strong>Fully differentiable</strong> (all operations are elementary),</li>
+            <li><strong>Faster</strong>: <code>𝒪(ε⁻²)</code> iteration complexity.</li>
+        </ul>
+
+        <!-- ============ MATH SETUP ============ -->
+        <h2>Mathematical Setup</h2>
+        <h3>Primal Problem (with Slacks)</h3>
+        <p>Let <em>p₁, …, pₘ</em> ∈ Δ<sub>n</sub> be discrete probability measures, <em>s</em> ∈ (0,1] the total mass to
+            transport, and <em>C</em> ∈ ℝ<sup>n × … × n</sup> an <em>m</em>-way cost tensor.</p>
+        <p>We seek a tensor <em>X</em> ≥ 0 and slack vectors <em>q<sub>k</sub></em> ≥ 0 such that:</p>
+        <div class="math">r<sub>k</sub>(X) + q<sub>k</sub> = p<sub>k</sub> &nbsp; ∀ k, &nbsp;&nbsp; ⟨X, 1⟩ = s</div>
+        <p>where <em>r<sub>k</sub>(X)</em> is the <em>k</em>-th marginal of <em>X</em>. The objective is:</p>
+        <div class="math">min<sub>X,q</sub> ⟨C, X⟩ + η ∑ X<sub>i</sub> log X<sub>i</sub> + η ∑<sub>k,j</sub>
+            q<sub>k,j</sub> log q<sub>k,j</sub></div>
+        <p>(the entropy term guarantees strong convexity and smoothness).</p>
+
+        <h3>Dual Problem</h3>
+        <p>Introduce dual variables <em>u<sub>k</sub></em> ∈ ℝ<sup>n</sup> (for each marginal) and <em>t</em> ∈ ℝ (for
+            the total mass). After simplifying, we obtain the <strong>smooth unconstrained dual</strong>:</p>
+        <div class="math">min<sub>u₁,…,uₘ,t</sub> φ(u,t) = D log( ∑ exp( t + ∑ u<sub>k,i<sub>k</sub></sub> − (1/η) C ) +
+            ∑ ||exp(u<sub>k</sub>)||₁ ) − ∑ ⟨u<sub>k</sub>, p<sub>k</sub>⟩ − ⟨t, s⟩</div>
+        <p>where <em>D = s + m(1−s)</em>.</p>
+
+        <!-- ============ RESCALING TRICK ============ -->
+        <h2>The Rescaling Trick (Core Insight)</h2>
+        <p>Instead of doing coordinate descent in the log‑space, we <strong>exponentiate</strong> the dual variables and
+            obtain <strong>multiplicative updates</strong> – exactly like classical Sinkhorn.</p>
+        <p>Define the <strong>scaling vectors</strong>:</p>
+        <div class="math">v<sub>k</sub> = exp(u<sub>k</sub>) ∈ ℝ<sup>n</sup><sub>+</sub>, &nbsp;&nbsp; w = exp(t) ∈
+            ℝ<sub>+</sub></div>
+        <p>and the <strong>Gibbs kernel</strong>:</p>
+        <div class="math">K<sub>i₁,…,iₘ</sub> = exp( − C<sub>i₁,…,iₘ</sub> / η )</div>
+        <p>Then the <strong>primal variables</strong> can be recovered <strong>without ever forming the full
+                n<sup>m</sup> tensor</strong>:</p>
+        <div class="math">X<sub>i₁,…,iₘ</sub> = (D / S) · w · K<sub>i₁,…,iₘ</sub> ∏ v<sub>k,i<sub>k</sub></sub></div>
+        <div class="math">q<sub>k,j</sub> = (D / S) · v<sub>k,j</sub></div>
+        <p>where the partition function is:</p>
+        <div class="math">S(v,w) = w · ∑ K · ∏ v<sub>k</sub> + ∑ ||v<sub>k</sub>||₁</div>
+        <p>From these, the <strong>current marginal estimate</strong> <em>R<sub>k</sub></em> and <strong>total
+                mass</strong> <em>M</em> are:</p>
+        <div class="math">R<sub>k,j</sub> = (D / S) · ( w · [r<sub>k</sub>(K ⊙ v₁ ⊗ … ⊗ vₘ)]<sub>j</sub> +
+            v<sub>k,j</sub> )</div>
+        <div class="math">M = (D / S) · w · ∑ K · ∏ v<sub>k</sub></div>
+
+        <!-- ============ ALGORITHM ============ -->
+        <h2>GreenkhornMMPOT Algorithm</h2>
+        <p>At each iteration, we <strong>identify the constraint with the largest violation</strong> (using the Bregman
+            divergence <em>ρ(a,b) = 1ᵀ(b−a) + ∑ a<sub>i</sub> log(a<sub>i</sub>/b<sub>i</sub>)</em>). Then we apply a
+            <strong>pure rescaling</strong> step:</p>
+
+        <h3>Pseudo‑code</h3>
+        <pre><code>Inputs:
+  C            : m‑way cost tensor (or callable function)
+  p₁...pₘ     : marginals (each of size n)
+  s            : total mass to transport (0 &lt; s ≤ 1)
+  η            : entropy regularization strength
+  ε            : tolerance for constraint error
+  T_max        : maximum iterations
+
+Initialize:
+  v_k = 1ₙ  for all k
+  w = 1
+  K = exp(-C / η)            // can be implicit
+
+for τ = 1 to T_max:
+
+    // ---- compute scaled kernel and partition ----
+    B = K ⊙ (v₁ ⊗ v₂ ⊗ ... ⊗ vₘ)
+    S = w * sum(B) + sum_k sum(v_k)
+
+    // ---- compute current estimates ----
+    for k = 1..m:
+        R_k = (D / S) * ( w * r_k(B) + v_k )
+    M = (D / S) * w * sum(B)
+
+    // ---- compute errors ----
+    err_k   = ρ(p_k, R_k)       for all k
+    err_mass = ρ(s, M)
+
+    // ---- greedy selection and rescaling ----
+    if max_k err_k > err_mass:
+        I = argmax_k err_k
+        v_I = v_I .* (p_I ./ R_I)       // element‑wise
+    else:
+        w = w * (s / M)
+
+    // ---- check convergence ----
+    E = sum_k ||R_k - p_k||₁ + |M - s|
+    if E &lt; ε:
+        break
+
+Output: v₁...vₘ, w  (implicitly define X and qₖ)</code></pre>
+
+        <h3>Why This Works (Intuition)</h3>
+        <ul>
+            <li><strong>Marginal update</strong>: <em>R<sub>I</sub></em> is linear in <em>v<sub>I</sub></em>.
+                Multiplying <em>v<sub>I</sub></em> by <em>p<sub>I</sub> / R<sub>I</sub></em> sets
+                <em>R<sub>I</sub><sup>new</sup> = p<sub>I</sub></em> exactly.</li>
+            <li><strong>Mass update</strong>: <em>X</em> is linear in <em>w</em>. Rescaling <em>w</em> by <em>s/M</em>
+                sets <em>M<sup>new</sup> = s</em> exactly.</li>
+            <li>The algorithm greedily corrects the <strong>worst</strong> violated constraint, guaranteeing a decrease
+                of the dual objective proportional to <em>E<sub>τ</sub>²</em> (see below).</li>
+        </ul>
+
+        <!-- ============ CONVERGENCE ============ -->
+        <h2>Convergence Guarantees (Theoretical Bounds)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Quantity</th>
+                    <th>Bound</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Dual gap</strong></td>
+                    <td>φ<sup>τ</sup> − φ<sup>*</sup> ≤ (m+1)·ℛ · E<sub>τ</sub></td>
+                </tr>
+                <tr>
+                    <td><strong>One‑step progress</strong></td>
+                    <td>φ<sup>τ</sup> − φ<sup>τ+1</sup> ≥ ½ ( E<sub>τ</sub> / (m+1) )²</td>
+                </tr>
+                <tr>
+                    <td><strong>Iterations to reach E<sub>τ</sub> ≤ ε</strong></td>
+                    <td>τ ≤ 2 + 2√2 · (m+1)³·ℛ / ε</td>
+                </tr>
+                <tr>
+                    <td><strong>Total complexity</strong></td>
+                    <td>𝒪̃( m⁴ n<sup>m</sup> ||C||<sub>∞</sub> / ε² )</td>
+                </tr>
+            </tbody>
+        </table>
+        <p>where <em>ℛ = 𝒪( ||C||<sub>∞</sub>/η + log(max p / min p) )</em>.</p>
+        <p><strong>Remark</strong>: For structured costs (e.g., sum of pairwise distances), the complexity drops to
+            <em>𝒪̃(m² n² / ε²)</em>.</p>
+
+        <!-- ============ DL INTEGRATION ============ -->
+        <h2>Deep Learning Integration</h2>
+        <h3>Differentiability</h3>
+        <p>Every operation in the loop (<code>exp</code>, <code>log</code>, <code>+</code>, <code>*</code>,
+            <code>/</code>, <code>sum</code>) is elementary and differentiable. You can use:</p>
+        <ul>
+            <li><strong>Unrolled differentiation</strong> – backpropagate through a fixed number of iterations.</li>
+            <li><strong>Implicit differentiation</strong> – treat the final optimality conditions as a fixed‑point and
+                differentiate via the implicit function theorem (more memory efficient).</li>
+        </ul>
+
+        <h3>Handling Large Tensors</h3>
+        <p>Storing the full <em>n<sup>m</sup></em> tensor is impossible for large <em>m</em> or <em>n</em>.</p>
+        <ul>
+            <li>If <em>C</em> is given by a <strong>neural network</strong> <em>C<sub>i₁,…,iₘ</sub> =
+                    f<sub>θ</sub>(z<sub>i₁</sub>, …, z<sub>iₘ</sub>)</em>, compute <em>r<sub>k</sub>(B)</em>
+                <strong>on‑the‑fly</strong> by aggregating over dimensions.</li>
+            <li>For <strong>additive costs</strong> <em>C = ∑<sub>a&lt;b</sub> c<sub>i<sub>a</sub>,
+                        i<sub>b</sub></sub></em>, the kernel factorises, reducing complexity to <em>O(m n²)</em>.</li>
+        </ul>
+
+        <h3>Usage in a Loss Function</h3>
+        <pre><code># Forward pass
+v, w = greenkhorn_mmpot(cost_fn=my_network(embeddings),
+                        p=p_list, s=s, eta=eta, eps=1e-3)
+
+# transport_cost = ⟨C, X⟩ = (D/S) * w * sum( B ⊙ C )
+loss = transport_cost + lambda * task_loss(X)   # X is implicit
+loss.backward()   # automatic differentiation</code></pre>
+
+        <!-- ============ STABILITY ============ -->
+        <h2>Numerical Stability Tips</h2>
+        <ul>
+            <li>Use <code>logsumexp</code> to compute <em>S</em> and the marginals – this avoids overflow.</li>
+            <li>Clip <em>v<sub>k</sub></em> and <em>w</em> to [10⁻¹⁰, 10¹⁰] after each update.</li>
+            <li>Start with <em>v<sub>k</sub></em> = 1, <em>w</em> = 1.</li>
+            <li>For warm‑start (e.g., in sequential batches), reuse the previous <em>v,w</em>.</li>
+        </ul>
+
+        <!-- ============ COMPARISON ============ -->
+        <h2>Why Not the Dummy‑Point Trick?</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Approach</th>
+                    <th>Feasibility</th>
+                    <th>Complexity</th>
+                    <th>Differentiability</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Dummy‑point reduction</td>
+                    <td><strong>Infeasible</strong> (entropy breaks constraints)</td>
+                    <td>𝒪(ε⁻⁴)</td>
+                    <td>Poor (sparse updates)</td>
+                </tr>
+                <tr>
+                    <td><strong>GreenkhornMMPOT</strong></td>
+                    <td><strong>Strictly feasible</strong> (exact constraints after each update)</td>
+                    <td>𝒪(ε⁻²)</td>
+                    <td><strong>Smooth & fully differentiable</strong></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- ============ REFERENCES ============ -->
+        <h2>References</h2>
+        <ul>
+            <li>Altschuler, J., Niles‑Weed, J., &amp; Rigollet, P. (2017). <em>Near‑linear time approximation algorithms
+                    for optimal transport via Sinkhorn iteration.</em> NeurIPS.</li>
+            <li>Lin, T., Ho, N., Cuturi, M., &amp; Jordan, M. I. (2022). <em>On the complexity of approximating
+                    multimarginal optimal transport.</em> JMLR.</li>
+            <li>Nguyen, A. D., et al. (2024). <em>On partial optimal transport: Revising the infeasibility of sinkhorn
+                    and efficient gradient methods.</em> AAAI.</li>
+            <li><em>This paper</em>: <strong>On Multi‑Marginal Partial Optimal Transport: Rectifying Infeasible
+                    Extension Strategies and Efficient Primal‑Dual Methods.</strong> (Draft, 2025).</li>
+        </ul>
+
+        <!-- ============ LICENSE ============ -->
+        <div class="footer">
+            Released under the MIT License &nbsp;·&nbsp; <span class="badge">Happy transporting 🚀</span>
+        </div>
+
+    </div>
+</body>
+
+</html>

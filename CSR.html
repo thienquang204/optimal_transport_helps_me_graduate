@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Beyond Matryoshka: Sparse Coding for Adaptive Representation (CSR) — Deep Dive</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #f6f8fa;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            color: #1e293b;
+            line-height: 1.7;
+            padding: 2rem 1.5rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #ffffff;
+            border-radius: 24px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.06);
+            padding: 2.5rem 3rem;
+        }
+
+        h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, #0f172a, #8b5cf6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 0.25rem;
+        }
+
+        .subtitle {
+            font-size: 1.05rem;
+            color: #64748b;
+            border-left: 4px solid #8b5cf6;
+            padding-left: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        h2 {
+            font-size: 1.7rem;
+            font-weight: 600;
+            margin-top: 2.8rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.4rem;
+            border-bottom: 2px solid #e9edf2;
+            color: #0f172a;
+        }
+
+        h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 2rem;
+            margin-bottom: 0.8rem;
+            color: #1e293b;
+        }
+
+        h4 {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+            color: #334155;
+        }
+
+        p {
+            margin-bottom: 1rem;
+            color: #334155;
+        }
+
+        ul,
+        ol {
+            margin: 0.5rem 0 1.2rem 1.8rem;
+        }
+
+        li {
+            margin-bottom: 0.4rem;
+        }
+
+        .highlight-box {
+            background: #f1f5f9;
+            border-radius: 14px;
+            padding: 1.5rem 2rem;
+            margin: 1.8rem 0;
+            border-left: 6px solid #8b5cf6;
+        }
+
+        .highlight-box strong {
+            color: #0f172a;
+        }
+
+        .code-block {
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 14px;
+            padding: 1.5rem 1.8rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+            font-family: "JetBrains Mono", "Fira Code", monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+
+        .code-block .comment {
+            color: #94a3b8;
+        }
+
+        .code-block .keyword {
+            color: #f472b6;
+        }
+
+        .code-block .func {
+            color: #60a5fa;
+        }
+
+        .code-block .string {
+            color: #34d399;
+        }
+
+        .code-block .number {
+            color: #fbbf24;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            font-size: 0.95rem;
+        }
+
+        th,
+        td {
+            padding: 0.7rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid #e9edf2;
+        }
+
+        th {
+            background: #f1f5f9;
+            font-weight: 600;
+            color: #0f172a;
+        }
+
+        tr:hover {
+            background: #f8fafc;
+        }
+
+        .tag {
+            display: inline-block;
+            background: #ede9fe;
+            color: #7c3aed;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.2rem 0.7rem;
+            border-radius: 20px;
+            margin-right: 0.3rem;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin: 1.2rem 0;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1.5rem;
+            }
+
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            .grid-2 {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .footnote {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            margin-top: 2rem;
+            border-top: 1px solid #e9edf2;
+            padding-top: 1.5rem;
+        }
+
+        .citation {
+            background: #fefce8;
+            border-radius: 8px;
+            padding: 0.1rem 0.4rem;
+            font-size: 0.85rem;
+            color: #a16207;
+        }
+
+        .warning {
+            background: #fef2f2;
+            border-radius: 14px;
+            padding: 1.5rem 2rem;
+            margin: 1.8rem 0;
+            border-left: 6px solid #ef4444;
+        }
+
+        .warning strong {
+            color: #dc2626;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+
+        <h1>🧠 Beyond Matryoshka: Sparse Coding for Adaptive Representation</h1>
+        <div class="subtitle">
+            Deep Dive · Core Ideas · CSR Framework · Experiments &amp; Tuning
+            <span style="display:inline-block;margin-left:1.5rem;font-size:0.85rem;color:#94a3b8;">
+                arXiv:2503.01776 &nbsp;|&nbsp; Wen et al.
+            </span>
+        </div>
+
+        <!-- ========================================================= -->
+        <h2>1. Core Idea — Sparse Coding vs. Matryoshka</h2>
+
+        <p>
+            <strong>Matryoshka Representation Learning (MRL)</strong> (Kusupati et al., 2022) enables adaptive embedding
+            lengths by training a single model with multiple classification heads on nested prefixes. While elegant, MRL
+            has two critical limitations:
+        <ul>
+            <li><strong>Full retraining required</strong> — you must fine‑tune the entire backbone, which is expensive
+                for large models.</li>
+            <li><strong>Performance degradation at short lengths</strong> — accuracy drops significantly (e.g., &gt;10%
+                on ImageNet) when using very low dimensions.</li>
+        </ul>
+        </p>
+        <p>
+            This paper proposes <strong>Contrastive Sparse Representation (CSR)</strong> as a <em>post‑training</em>
+            alternative. Instead of truncating dense vectors, CSR <strong>sparsifies</strong> pre‑trained embeddings
+            into a high‑dimensional space where only a few (<em>k</em>) dimensions are activated per sample. The key
+            advantages:
+        </p>
+        <div class="highlight-box">
+            <strong>💡 CSR wins where MRL falls short:</strong><br />
+            • <strong>Plug‑and‑play</strong> — works on top of <em>frozen</em> foundation models (CLIP, NV‑Embed, etc.)
+            with minimal training (hours vs. days).<br />
+            • <strong>Higher fidelity at extreme sparsity</strong> — e.g., with <em>k=8</em> active dimensions, CSR
+            beats MRL by &gt;20% on ImageNet 1‑NN.<br />
+            • <strong>Faster inference</strong> — sparse matrix multiplication scales with <em>O(k)</em>, enabling
+            <strong>69× speedup</strong> over quantized dense retrieval on GPUs.
+        </div>
+
+        <p>
+            The framework is illustrated in Figure 2 of the paper: a frozen embedding <em>v</em> ∈ ℝ<sup>d</sup> is
+            passed through a sparse autoencoder (SAE) that projects to a higher‑dim hidden space ℝ<sup>h</sup> (h = 4d
+            by default) and applies Top‑<em>k</em> activation. The resulting sparse vector <em>z</em> has only
+            <em>k</em> non‑zero entries, enabling efficient storage and computation.
+        </p>
+
+        <!-- ========================================================= -->
+        <h2>2. Data &amp; Experimental Setup</h2>
+
+        <h3>2.1 Datasets</h3>
+        <p>The paper evaluates across three modalities:</p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Modality</th>
+                    <th>Dataset(s)</th>
+                    <th>Task</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Vision</strong></td>
+                    <td>ImageNet‑1K (1.3M train / 50K val)</td>
+                    <td>1‑NN classification, linear probing</td>
+                </tr>
+                <tr>
+                    <td><strong>Text</strong></td>
+                    <td>MTEB benchmark (classification, clustering, retrieval)</td>
+                    <td>e.g., Banking77, TweetSentiment, SciFACT, etc.</td>
+                </tr>
+                <tr>
+                    <td><strong>Multimodal</strong></td>
+                    <td>MS COCO, Flickr30K (in‑distribution &amp; zero‑shot)</td>
+                    <td>Image‑text retrieval (I2T / T2I)</td>
+                </tr>
+            </tbody>
+        </table>
+        <p>
+            For vision, the backbone is ResNet‑50 (d=2048); for text, NV‑Embed‑V2 (d=4096); for multimodal, ViT‑B/16
+            (d=512). CSR is trained on <em>frozen</em> embeddings extracted from these backbones.
+        </p>
+
+        <h3>2.2 Evaluation Metrics</h3>
+        <ul>
+            <li><strong>1‑NN accuracy</strong> (vision) — exact L2 search using FAISS.</li>
+            <li><strong>Top‑1 accuracy</strong> (text classification) and <strong>NDCG@10</strong> (retrieval).</li>
+            <li><strong>Recall@5</strong> (multimodal retrieval).</li>
+            <li><strong>Retrieval time</strong> — measured on GPU with PyTorch’s sparse/dense matmul, normalized against
+                CSR default.</li>
+        </ul>
+
+        <!-- ========================================================= -->
+        <h2>3. Implementation — Contrastive Sparse Representation (CSR)</h2>
+
+        <h3>3.1 Sparse Autoencoder (SAE) with Top‑K</h3>
+        <p>
+            CSR builds on the Top‑K SAE from Gao et al. (2024). Given a dense embedding <em>v</em> = f(x) ∈
+            ℝ<sup>d</sup>, the encoder projects to hidden space, applies ReLU, then retains only the <em>k</em> largest
+            values:
+        </p>
+        <div class="code-block">
+            <span class="comment"># SAE encoding step</span>
+            z_pre = W_enc @ (v - b_pre) + b_enc <span class="comment"># [h]</span>
+            z_relu = relu(z_pre)
+            z = topk(z_relu, k) <span class="comment"># keep top k, zero out rest</span>
+            v_hat = W_dec @ z + b_pre <span class="comment"># reconstruction</span>
+        </div>
+        <p>
+            The reconstruction loss is <strong>L<sub>recon</sub> = ||v − v_hat||₂²</strong>. To mitigate “dead latents”
+            (neurons that never activate), the paper adds an auxiliary loss (L<sub>aux</sub>) and a multi‑Top‑K loss
+            (L(4k)/8) as in Gao et al.:
+        </p>
+        <div class="code-block">
+            <span class="comment"># Overall reconstruction loss</span>
+            L_recon = L(k) + L(4k)/8 + β * L_aux
+            <span class="comment"># where L_aux reconstructs residuals using dead latents</span>
+        </div>
+
+        <h3>3.2 Sparse Contrastive Learning (NCL)</h3>
+        <p>
+            To improve discriminative power, CSR adds a <strong>non‑negative contrastive loss</strong> (NCL) on the
+            sparse vectors <em>z</em>. Since <em>z</em> ≥ 0 (ReLU + Top‑K), the loss aligns with theoretical guarantees
+            of identifiability and disentanglement (Wang et al., 2024).
+        </p>
+        <div class="code-block">
+            <span class="comment"># Contrastive loss over a batch</span>
+            L_cl = - (1/B) Σ_i log( exp(z_iᵀ z_i) / (exp(z_iᵀ z_i) + Σ_{j≠i} exp(z_iᵀ z_j)) )
+        </div>
+
+        <h3>3.3 Overall Objective</h3>
+        <p>
+            The final training objective combines reconstruction and contrastive terms:
+        </p>
+        <div class="code-block">
+            <span class="comment"># CSR total loss</span>
+            L_CSR = L_recon + γ * L_cl
+            <span class="comment"># γ = 1 by default</span>
+        </div>
+        <p>
+            Only the SAE parameters (encoder/decoder) are trained; the backbone remains frozen. This makes CSR orders of
+            magnitude faster to train than MRL (see Figure 1(c)).
+        </p>
+
+        <h3>3.4 Inference — Sparse Retrieval</h3>
+        <p>
+            For a query, we compute its sparse vector <em>z</em> (only <em>k</em> active dims). The database stores
+            sparse vectors in a compact format (e.g., COO). The similarity (dot product) between query and database
+            vectors can be computed using <strong>sparse matrix multiplication</strong>, which has complexity <em>O(k ·
+                N)</em> instead of <em>O(d · N)</em> for dense retrieval. The paper shows that with <em>k</em> = 16, CSR
+            achieves a <strong>2.1× speedup</strong> over dense MRL at the same active dimension, and the advantage
+            grows with database size.
+        </p>
+
+        <!-- ========================================================= -->
+        <h2>4. Key Results &amp; Comparisons</h2>
+
+        <h3>4.1 Vision: ImageNet 1‑NN &amp; Top‑1</h3>
+        <p>
+            Figure 7 in the paper shows that CSR (trained on frozen RN50 embeddings) consistently outperforms MRL (which
+            trains the full backbone) across all active dimensions. At extremely low dimensions (k=4, 8), CSR beats MRL
+            by <strong>&gt;20%</strong>. The gap narrows at higher dimensions but CSR remains competitive or better.
+        </p>
+        <div class="highlight-box">
+            <strong>Key takeaway:</strong> CSR achieves MRL‑level accuracy with <strong>no backbone training</strong>,
+            and excels exactly where efficiency matters most — very sparse representations.
+        </div>
+
+        <h3>4.2 Text: MTEB Benchmark</h3>
+        <p>
+            Table 1 (reproduced below) compares CSR (k=32) with various MRL‑style text embedding models. CSR, using
+            NV‑Embed‑V2 as the frozen backbone, achieves <strong>15% accuracy improvement</strong> at matched retrieval
+            time (compared to Jina‑V3‑64) and a <strong>61× speedup</strong> when matching the performance of the full
+            dense model.
+        </p>
+        <table>
+            <caption>Performance on text classification (Top‑1 Acc, %). CSR with k=32 stands out.</caption>
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th>Active Dim</th>
+                    <th>Banking77</th>
+                    <th>TweetSentiment</th>
+                    <th>Biorxiv</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>NV‑Embed‑V2 (full)</td>
+                    <td>4096</td>
+                    <td>92.20</td>
+                    <td>79.73</td>
+                    <td>53.61</td>
+                </tr>
+                <tr>
+                    <td>Jina‑V3 (MRL)</td>
+                    <td>256</td>
+                    <td>84.08</td>
+                    <td>73.81</td>
+                    <td>38.14</td>
+                </tr>
+                <tr>
+                    <td><strong>CSR (w/ NV‑Embed)</strong></td>
+                    <td><strong>32</strong></td>
+                    <td><strong>91.02</strong></td>
+                    <td><strong>78.55</strong></td>
+                    <td><strong>53.40</strong></td>
+                </tr>
+            </tbody>
+        </table>
+        <p>
+            The results demonstrate that CSR not only preserves but often <em>enhances</em> the semantic quality of the
+            base embedding, thanks to the combined reconstruction + contrastive training.
+        </p>
+
+        <h3>4.3 Multimodal: MS COCO &amp; Flickr30K</h3>
+        <p>
+            Table 2 shows that CSR (plug‑and‑play, 1.1M trainable params) consistently outperforms fully fine‑tuned MRL
+            (86M params) on both in‑distribution and zero‑shot image‑text retrieval. For example, at active dim 128 on
+            MS COCO, CSR achieves <strong>69.34%</strong> I2T Recall@5 vs. MRL’s 64.19% — a <strong>5% absolute
+                gain</strong> with <strong>78× fewer trainable parameters</strong>.
+        </p>
+
+        <!-- ========================================================= -->
+        <h2>5. Parameter Tuning Guide</h2>
+
+        <h3>5.1 Active Dimension <em>k</em></h3>
+        <ul>
+            <li><strong>Default:</strong> k=32 for vision and text; k=64–256 for multimodal.</li>
+            <li><strong>Trade‑off:</strong> Smaller k → faster retrieval but potential accuracy drop. CSR is robust down
+                to k=8.</li>
+            <li><strong>Recommendation:</strong> Start with k=32 and adjust based on your latency budget.</li>
+        </ul>
+
+        <h3>5.2 Hidden Dimension <em>h</em></h3>
+        <ul>
+            <li>The paper finds an <strong>inverted‑U</strong> relationship: performance peaks at <strong>h =
+                    4d</strong> (d = input embedding dim).</li>
+            <li>For ResNet‑50 (d=2048), use h=8192; for ViT‑B/16 (d=512), h=2048.</li>
+            <li>Excessively large h (e.g., 16d) leads to more dead latents and degrades performance.</li>
+        </ul>
+
+        <h3>5.3 Loss Weight γ</h3>
+        <ul>
+            <li>Default γ = 1 works well across tasks.</li>
+            <li>If your task is highly discriminative (e.g., retrieval), you may increase γ to 2–5 to emphasize
+                contrastive loss.</li>
+            <li>For generative tasks where reconstruction fidelity matters more, reduce γ to 0.5.</li>
+        </ul>
+
+        <h3>5.4 Auxiliary Loss Parameters</h3>
+        <ul>
+            <li>Follow Gao et al. (2024): <strong>k<sub>aux</sub> = 512</strong>, β = 1/32.</li>
+            <li>Multi‑TopK loss: include L(4k)/8 to reduce dead latents.</li>
+        </ul>
+
+        <h3>5.5 Training Hyperparameters</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Parameter</th>
+                    <th>Vision (RN50)</th>
+                    <th>Text (NV‑Embed)</th>
+                    <th>Multimodal (ViT)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Optimizer</td>
+                    <td>Adam</td>
+                    <td>Adam</td>
+                    <td>Adam</td>
+                </tr>
+                <tr>
+                    <td>Learning rate</td>
+                    <td>1e‑4</td>
+                    <td>1e‑4</td>
+                    <td>1e‑4</td>
+                </tr>
+                <tr>
+                    <td>Batch size</td>
+                    <td>512</td>
+                    <td>256</td>
+                    <td>256</td>
+                </tr>
+                <tr>
+                    <td>Epochs</td>
+                    <td>1–5</td>
+                    <td>1–5</td>
+                    <td>1–5</td>
+                </tr>
+                <tr>
+                    <td>Training time</td>
+                    <td>&lt;1 hour (single GPU)</td>
+                    <td>~2 hours</td>
+                    <td>~3 hours</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- ========================================================= -->
+        <h2>6. Full Implementation (PyTorch Skeleton)</h2>
+
+        <div class="code-block">
+            <span class="comment">"""
+                CSR implementation based on the paper.
+                Assumes a frozen backbone that produces dense embeddings `v` of dimension `d`.
+                """</span>
+
+            <span class="keyword">import</span> torch
+            <span class="keyword">import</span> torch.nn <span class="keyword">as</span> nn
+            <span class="keyword">import</span> torch.nn.functional <span class="keyword">as</span> F
+
+            <span class="keyword">class</span> <span class="func">TopKSAE</span>(nn.Module):
+            <span class="keyword">def</span> <span class="func">__init__</span>(self, d, h, k, k_aux=512, beta=1/32):
+            super().__init__()
+            self.d = d
+            self.h = h
+            self.k = k
+            self.k_aux = k_aux
+            self.beta = beta
+
+            <span class="comment"># Encoder / Decoder (tied weights optional)</span>
+            self.W_enc = nn.Linear(d, h, bias=<span class="keyword">False</span>)
+            self.W_dec = nn.Linear(h, d, bias=<span class="keyword">False</span>)
+            self.b_pre = nn.Parameter(torch.zeros(d))
+            self.b_enc = nn.Parameter(torch.zeros(h))
+
+            <span class="comment"># Initialize weights (optional)</span>
+
+            <span class="keyword">def</span> <span class="func">encode</span>(self, v):
+            <span class="comment"># v: [B, d]</span>
+            z_pre = self.W_enc(v - self.b_pre) + self.b_enc <span class="comment"># [B, h]</span>
+            z_relu = F.relu(z_pre)
+            <span class="comment"># Top‑K selection</span>
+            topk_vals, topk_idx = torch.topk(z_relu, self.k, dim=-1)
+            z = torch.zeros_like(z_relu).scatter_(-1, topk_idx, topk_vals)
+            <span class="keyword">return</span> z
+
+            <span class="keyword">def</span> <span class="func">decode</span>(self, z):
+            <span class="keyword">return</span> self.W_dec(z) + self.b_pre
+
+            <span class="keyword">def</span> <span class="func">forward</span>(self, v):
+            z = self.encode(v)
+            v_hat = self.decode(z)
+            <span class="comment"># Reconstruction loss L(k)</span>
+            L_k = F.mse_loss(v_hat, v)
+            <span class="comment"># Multi‑TopK loss L(4k) / 8</span>
+            <span class="comment"># (simplified: encode with 4k and decode)</span>
+            <span class="comment"># Auxiliary loss on dead latents (see paper for full details)</span>
+            <span class="comment"># For brevity, we return the main loss; in practice implement all terms.</span>
+            <span class="keyword">return</span> L_k, z, v_hat
+
+            <span class="keyword">class</span> <span class="func">CSRModel</span>(nn.Module):
+            <span class="keyword">def</span> <span class="func">__init__</span>(self, backbone, d, h, k, gamma=1.0):
+            super().__init__()
+            self.backbone = backbone <span class="comment"># frozen</span>
+            self.sae = TopKSAE(d, h, k)
+            self.gamma = gamma
+
+            <span class="keyword">def</span> <span class="func">forward</span>(self, x, y=None):
+            <span class="comment"># x: input (image, text, etc.)</span>
+            <span class="keyword">with</span> torch.no_grad():
+            v = self.backbone(x) <span class="comment"># dense embedding</span>
+            L_recon, z, v_hat = self.sae(v)
+            <span class="comment"># Contrastive loss (on z) if labels are provided</span>
+            L_cl = 0.0
+            <span class="keyword">if</span> y <span class="keyword">is</span> <span class="keyword">not</span> <span
+                class="keyword">None</span>:
+            L_cl = self.<span class="func">contrastive_loss</span>(z, y)
+            loss = L_recon + self.gamma * L_cl
+            <span class="keyword">return</span> loss, z
+
+            <span class="keyword">def</span> <span class="func">contrastive_loss</span>(self, z, y):
+            <span class="comment"># Simplified supervised contrastive loss</span>
+            <span class="comment"># For unsupervised, use NCL as in the paper (zᵀz positive, neg pairs)</span>
+            <span class="comment"># Here we show a batch‑wise NCL</span>
+            sim = z @ z.T <span class="comment"># [B, B]</span>
+            <span class="comment"># Positive pairs are diagonal; negatives are off‑diagonal</span>
+            pos = sim.diag().unsqueeze(1) <span class="comment"># [B, 1]</span>
+            neg = sim <span class="comment"># all pairs</span>
+            <span class="comment"># For simplicity, we use InfoNCE‑style</span>
+            logits = torch.cat([pos, neg], dim=1)
+            labels = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
+            loss = F.cross_entropy(logits, labels)
+            <span class="keyword">return</span> loss
+
+            <span class="comment"># ---------- Training Loop ----------</span>
+            <span class="comment"># Assume we have a dataloader that yields (x, y) and a frozen backbone</span>
+            backbone = ... <span class="comment"># e.g., resnet50(pretrained=True) without classifier head</span>
+            backbone.eval()
+            <span class="keyword">for</span> param <span class="keyword">in</span> backbone.parameters():
+            param.requires_grad = <span class="keyword">False</span>
+
+            d = 2048 <span class="comment"># ResNet50 feature dim</span>
+            h = 4 * d <span class="comment"># 8192</span>
+            k = 32
+            model = CSRModel(backbone, d, h, k)
+            optimizer = torch.optim.Adam(model.sae.parameters(), lr=1e-4)
+
+            <span class="keyword">for</span> epoch <span class="keyword">in</span> range(5):
+            <span class="keyword">for</span> x, y <span class="keyword">in</span> dataloader:
+            loss, z = model(x, y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            <span class="comment"># ---------- Inference (sparse retrieval) ----------</span>
+            <span class="comment"># Encode database embeddings into sparse vectors</span>
+            db_sparse = []
+            <span class="keyword">for</span> x_db <span class="keyword">in</span> db_loader:
+            <span class="keyword">with</span> torch.no_grad():
+            _, z = model(x_db, <span class="keyword">None</span>)
+            <span class="comment"># Store z in sparse format (COO)</span>
+            db_sparse.append(z.to_sparse())
+            <span class="comment"># Query</span>
+            query_sparse = model.encode(query_embedding) <span class="comment"># sparse</span>
+            <span class="comment"># Compute dot product using sparse matmul (efficient on GPU)</span>
+            scores = torch.mm(query_sparse, db_sparse.t()) <span class="comment"># sparse‑dense or sparse‑sparse</span>
+        </div>
+
+        <!-- ========================================================= -->
+        <h2>7. Subtle Parts &amp; Critical Analysis</h2>
+
+        <h3>7.1 Dead Latents — The Achilles’ Heel</h3>
+        <p>
+            Sparse autoencoders often suffer from <strong>dead neurons</strong> that never activate, reducing effective
+            capacity. The paper shows that even with auxiliary and multi‑TopK losses, dead latents persist, especially
+            at extreme sparsity (k=8,16). The addition of the non‑negative contrastive loss (NCL) <em>partially</em>
+            alleviates this by encouraging more orthogonal and disentangled features (Theorem 5). However, the problem
+            remains, particularly in multimodal settings — this is identified as an open challenge.
+        </p>
+        <div class="warning">
+            <strong>⚠️ Engineering trade‑off:</strong> Increasing <em>h</em> beyond 4d worsens dead latents, hurting
+            performance. The paper recommends <em>h=4d</em> as the sweet spot.
+        </div>
+
+        <h3>7.2 Retrieval Time — Sparse Matmul Nuances</h3>
+        <p>
+            While CSR and MRL share the same theoretical complexity <em>O(k)</em> for a given active dimension, actual
+            runtime depends on library implementations:
+        <ul>
+            <li><strong>cuBLAS (dense)</strong> is highly optimized but has higher launch overhead.</li>
+            <li><strong>cuSPARSE (sparse)</strong> is lighter but less optimized for very small <em>k</em>.</li>
+        </ul>
+        The paper observes that CSR becomes <strong>faster</strong> than dense MRL when <em>k</em> is small (≤16) and
+        database size is large (≥1M), as sparse operations scale better with dataset growth (see Figure 3).
+        </p>
+
+        <h3>7.3 CSR vs. SAE (No Contrastive Loss)</h3>
+        <p>
+            The contrastive loss is crucial. Without it (vanilla SAE), performance drops significantly, especially on
+            discriminative tasks like retrieval. The combination of reconstruction (preserving semantics) and
+            contrastive (enhancing discriminability) is what makes CSR superior.
+        </p>
+
+        <h3>7.4 Orthogonality to Other Compression Techniques</h3>
+        <p>
+            CSR operates at the <em>post‑embedding</em> stage, making it <strong>complementary</strong> to pruning,
+            quantization, and distillation of the backbone itself. You can first quantize your backbone, then apply CSR
+            on its embeddings for additional speedups.
+        </p>
+
+        <h3>7.5 Generalization Across Modalities</h3>
+        <p>
+            The paper demonstrates CSR’s versatility across vision (ResNet, ViT), text (NV‑Embed), and multimodal
+            (CLIP‑style) backbones. The framework is agnostic to the input modality, as long as you can extract a dense
+            embedding. This makes it a <strong>drop‑in replacement</strong> for MRL in many real‑world systems.
+        </p>
+
+        <!-- ========================================================= -->
+        <h2>8. Summary &amp; Engineering Perspective</h2>
+
+        <div class="highlight-box">
+            <p style="margin-bottom:0;">
+                <strong>Contrastive Sparse Representation (CSR)</strong> offers a pragmatic, high‑performance
+                alternative to MRL for adaptive embedding compression. From an engineering standpoint, its key strengths
+                are:
+            <ul>
+                <li><strong>Low training cost</strong> — only a lightweight SAE is trained; backbone remains frozen.
+                </li>
+                <li><strong>Superior accuracy‑speed trade‑off</strong> — especially at extreme sparsity, where it
+                    outperforms MRL by large margins.</li>
+                <li><strong>Easy integration</strong> — works with any pre‑trained encoder and leverages PyTorch’s
+                    native sparse operations.</li>
+            </ul>
+            The main caveat is the dead latent issue, which requires careful tuning of <em>h</em>, <em>k</em>, and loss
+            weights. For production use, start with the default hyperparameters (h=4d, k=32, γ=1) and monitor active
+            neuron ratios. CSR is a compelling choice for large‑scale retrieval systems where latency and memory are
+            critical.
+            </p>
+        </div>
+
+        <div class="footnote">
+            📄 Based on arXiv:2503.01776 (Wen et al.) · All citations refer to the original paper.
+        </div>
+
+    </div>
+</body>
+
+</html>
