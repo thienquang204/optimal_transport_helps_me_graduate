@@ -1,0 +1,13 @@
+.git
+.agents
+.codex
+.DS_Store
+__pycache__/
+*.py[cod]
+*.pt
+*.pth
+*.ckpt
+data/
+runs/
+outputs/
+wandb/

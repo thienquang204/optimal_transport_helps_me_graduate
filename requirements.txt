@@ -1,0 +1,7 @@
+# Direct runtime dependencies. Versions are pinned to the tested `thangbo`
+# environment so local, CI, and Docker runs use the same APIs.
+torch==2.13.0
+torchvision==0.28.0
+datasets==5.0.1
+huggingface-hub==1.27.0
+Pillow==12.3.0
