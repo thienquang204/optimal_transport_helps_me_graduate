@@ -189,9 +189,11 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--epochs", type=int, default=90)
     train.add_argument("--batch-size", type=int, default=256)
     train.add_argument("--workers", type=int, default=8)
-    train.add_argument("--optimizer", choices=("sgd", "adamw"), default="sgd")
+    train.add_argument("--optimizer", choices=("sgd", "adam", "adamw"), default="sgd")
     train.add_argument("--lr", type=float, default=0.1)
     train.add_argument("--momentum", type=float, default=0.9)
+    train.add_argument("--adam-beta1", type=float, default=0.9)
+    train.add_argument("--adam-beta2", type=float, default=0.999)
     train.add_argument("--weight-decay", type=float, default=1e-4)
     train.add_argument("--scheduler", choices=("cosine", "step", "none"), default="cosine")
     train.add_argument("--step-milestones", type=parse_csv_ints, default=[30, 60, 80])
@@ -242,6 +244,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("label-smoothing must be in [0, 1)")
     if args.lr <= 0.0 or args.weight_decay < 0.0 or args.probe_lr <= 0.0:
         raise ValueError("learning rates must be positive and weight decay non-negative")
+    if not 0.0 <= args.momentum < 1.0:
+        raise ValueError("momentum must be in [0, 1)")
+    if not 0.0 <= args.adam_beta1 < 1.0 or not 0.0 <= args.adam_beta2 < 1.0:
+        raise ValueError("Adam beta values must be in [0, 1)")
     if args.probe_epochs < 1 and "linear" in args.benchmark:
         raise ValueError("probe-epochs must be positive when linear benchmarking is enabled")
     if args.resume and args.resume != "auto" and args.method == "both":
@@ -718,6 +724,13 @@ def build_model(
 def build_optimizer(model: nn.Module, args: argparse.Namespace) -> torch.optim.Optimizer:
     if args.optimizer == "sgd":
         return torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    if args.optimizer == "adam":
+        return torch.optim.Adam(
+            model.parameters(),
+            lr=args.lr,
+            betas=(args.adam_beta1, args.adam_beta2),
+            weight_decay=args.weight_decay,
+        )
     return torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 
@@ -1036,7 +1049,6 @@ def run_linear_probe(
     val_loader: DataLoader,
     device: torch.device,
     args: argparse.Namespace,
-    method_dir: Path,
 ) -> Dict[str, Any]:
     for parameter in model.encoder.parameters():
         parameter.requires_grad_(False)
@@ -1091,17 +1103,6 @@ def run_linear_probe(
         }
         for index, dim in enumerate(model.nested_dims)
     }
-    atomic_torch_save(
-        {
-            "probe": probes.state_dict(),
-            "nested_dims": list(model.nested_dims),
-            "num_classes": model.num_classes,
-            "epochs": args.probe_epochs,
-            "lr": args.probe_lr,
-            "weight_decay": args.probe_weight_decay,
-        },
-        method_dir / "linear_probe.pt",
-    )
     for parameter in model.encoder.parameters():
         parameter.requires_grad_(True)
     return {
@@ -1242,7 +1243,7 @@ def train_and_benchmark_method(
         probe_train_loader = make_loader(bundle.train, args, shuffle=True, seed_offset=4)
         probe_val_loader = make_loader(bundle.val, args, shuffle=False, seed_offset=5)
         results["linear"] = run_linear_probe(
-            model, probe_train_loader, probe_val_loader, device, args, method_dir
+            model, probe_train_loader, probe_val_loader, device, args
         )
     atomic_json_dump(results, method_dir / "results.json")
     return results

@@ -131,7 +131,7 @@ start_pipeline() {
         echo "[3/3] Entering the container and streaming the full pipeline output..."
         echo "In tmux, detach with Ctrl+B then D. Do not press Ctrl+C unless you want to stop it."
         echo "Dataset:     Docker volume '$DATA_VOLUME'"
-        echo "Checkpoints: $OUTPUT_ROOT/imagenet_rn50"
+        echo "Checkpoints root: $OUTPUT_ROOT (see OUTPUT_DIR in .env/container log)"
         echo
         docker_sudo run -it \
             --name "$CONTAINER_NAME" \
