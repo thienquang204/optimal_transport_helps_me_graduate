@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 # Host-side A-Z runner. It builds the image with sudo, keeps ImageNet in a
 # Docker named volume, writes checkpoints to ./runs, and starts the full
-# download/train/benchmark pipeline in a detached restartable container.
+# download/train/benchmark pipeline in the foreground by default. This is
+# intended for tmux, where all download and training output stays visible.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -81,6 +82,7 @@ stop_legacy_downloader() {
 }
 
 start_pipeline() {
+    local run_mode="${1:-foreground}"
     preflight
 
     if container_running; then
@@ -107,33 +109,49 @@ start_pipeline() {
         docker_sudo rm "$CONTAINER_NAME" >/dev/null
     fi
 
-    echo "[3/3] Starting the full pipeline in the background..."
-    docker_sudo run -d \
-        --name "$CONTAINER_NAME" \
-        --restart "on-failure:${RESTART_LIMIT}" \
-        --gpus all \
-        --shm-size=16g \
-        --env-file "$ENV_FILE" \
-        -v "${DATA_VOLUME}:/data" \
-        -v "${OUTPUT_ROOT}:/output" \
-        --entrypoint /bin/bash \
-        "$IMAGE_NAME" \
-        /app/container_pipeline.sh >/dev/null
+    if [[ "$run_mode" == "background" ]]; then
+        echo "[3/3] Starting the full pipeline in the background..."
+        docker_sudo run -d \
+            --name "$CONTAINER_NAME" \
+            --restart "on-failure:${RESTART_LIMIT}" \
+            --gpus all \
+            --shm-size=16g \
+            --env-file "$ENV_FILE" \
+            -v "${DATA_VOLUME}:/data" \
+            -v "${OUTPUT_ROOT}:/output" \
+            --entrypoint /bin/bash \
+            "$IMAGE_NAME" \
+            /app/container_pipeline.sh >/dev/null
 
-    echo
-    echo "Full pipeline started. You may close this terminal or disconnect SSH."
-    show_status
-    echo
-    echo "Logs:       $0 logs"
-    echo "Status:     $0 status"
-    echo "Stop:       $0 stop"
-    echo "Checkpoints: $OUTPUT_ROOT/imagenet_rn50"
-    echo "Dataset:    Docker volume '$DATA_VOLUME'"
+        echo
+        echo "Full pipeline started in the background."
+        show_status
+        echo "Logs:       $0 logs"
+    else
+        echo "[3/3] Entering the container and streaming the full pipeline output..."
+        echo "In tmux, detach with Ctrl+B then D. Do not press Ctrl+C unless you want to stop it."
+        echo "Dataset:     Docker volume '$DATA_VOLUME'"
+        echo "Checkpoints: $OUTPUT_ROOT/imagenet_rn50"
+        echo
+        docker_sudo run -it \
+            --name "$CONTAINER_NAME" \
+            --gpus all \
+            --shm-size=16g \
+            --env-file "$ENV_FILE" \
+            -v "${DATA_VOLUME}:/data" \
+            -v "${OUTPUT_ROOT}:/output" \
+            --entrypoint /bin/bash \
+            "$IMAGE_NAME" \
+            /app/container_pipeline.sh
+    fi
 }
 
 case "$ACTION" in
     start)
-        start_pipeline
+        start_pipeline foreground
+        ;;
+    background)
+        start_pipeline background
         ;;
     status)
         sudo -v
@@ -158,10 +176,10 @@ case "$ACTION" in
         if container_exists; then
             docker_sudo rm --force "$CONTAINER_NAME" >/dev/null
         fi
-        start_pipeline
+        start_pipeline foreground
         ;;
     *)
-        echo "Usage: $0 {start|status|logs|stop|restart}" >&2
+        echo "Usage: $0 {start|background|status|logs|stop|restart}" >&2
         exit 2
         ;;
 esac
