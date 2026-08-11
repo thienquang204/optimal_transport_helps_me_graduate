@@ -7,9 +7,13 @@ The ILSVRC ImageNet repository is gated. Before running this script:
    https://huggingface.co/datasets/ILSVRC/imagenet-1k
 2. Authenticate with ``hf auth login`` or export an approved ``HF_TOKEN``.
 
-The resulting cache is directly consumable by
+By default, all official ``train``, ``validation``, and ``test`` splits are
+downloaded. The resulting cache is directly consumable by
 ``matryoshka_mmpot_experiment.py --dataset imagenet --data-root CACHE``.
-ImageNet is large, so make sure CACHE is on a volume with ample free space.
+Training uses ``train`` and metrics use the labelled ``validation`` split;
+the official ``test`` split is retained for prediction/submission workflows
+and is allowed to be unlabelled. ImageNet is large, so make sure CACHE is on a
+volume with ample free space.
 """
 
 from __future__ import annotations
@@ -48,7 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-dir", type=Path, default=Path("data/huggingface"))
     parser.add_argument("--dataset-id", default="ILSVRC/imagenet-1k")
     parser.add_argument("--revision", default="main")
-    parser.add_argument("--splits", type=parse_splits, default=["train", "validation"])
+    parser.add_argument(
+        "--splits",
+        type=parse_splits,
+        default=["train", "validation", "test"],
+        help="official splits to cache; test may not contain ground-truth labels",
+    )
     parser.add_argument(
         "--token-env",
         default="HF_TOKEN",
@@ -65,23 +74,34 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_split(split_name: str, dataset: Any, check_samples: int) -> Dict[str, Any]:
-    if "image" not in dataset.column_names or "label" not in dataset.column_names:
+    if "image" not in dataset.column_names:
         raise RuntimeError(
-            f"split {split_name!r} has columns {dataset.column_names}, expected image and label"
+            f"split {split_name!r} has columns {dataset.column_names}, expected an image column"
         )
+    has_label_column = "label" in dataset.column_names
+    labels_available = has_label_column
     checked = min(check_samples, len(dataset))
     for index in range(checked):
         sample = dataset[index]
         image = sample["image"]
-        if image is None or sample["label"] is None:
-            raise RuntimeError(f"split {split_name!r} sample {index} failed to decode")
+        if image is None:
+            raise RuntimeError(f"split {split_name!r} image {index} failed to decode")
         if hasattr(image, "load"):
             image.load()
+        label = sample.get("label")
+        if label is None or (isinstance(label, int) and label < 0):
+            labels_available = False
+            if split_name != "test":
+                raise RuntimeError(
+                    f"labelled split {split_name!r} sample {index} has no valid label"
+                )
     return {
         "rows": len(dataset),
         "columns": list(dataset.column_names),
         "features": str(dataset.features),
         "fingerprint": getattr(dataset, "_fingerprint", None),
+        "has_label_column": has_label_column,
+        "sampled_labels_available": labels_available,
         "decoded_samples_checked": checked,
         "cache_files": [entry.get("filename") for entry in dataset.cache_files],
     }

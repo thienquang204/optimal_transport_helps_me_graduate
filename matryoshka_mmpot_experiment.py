@@ -46,6 +46,9 @@ Notes
   Datasets. ImageNet access is gated: accept its terms on the dataset page and
   authenticate with ``hf auth login`` or set ``HF_TOKEN`` before running.
   ``--dataset imagefolder`` remains available for an existing train/val tree.
+  The dedicated downloader caches train/validation/test; supervised training
+  uses train and all reported metrics use the labelled validation split. The
+  unlabelled official test split is not used to compute accuracy.
 * ``linear`` resets all classifiers, freezes the encoder, trains fresh probes
   on the training split, and evaluates them on validation.
 * ``knn`` uses the training split as the gallery and validation as queries,

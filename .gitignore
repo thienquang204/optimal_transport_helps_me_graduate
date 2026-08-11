@@ -1,0 +1,16 @@
+# Local credentials: never commit Hugging Face tokens.
+.env
+.env.*
+!.env.example
+
+# Runtime artifacts and large local data.
+__pycache__/
+*.py[cod]
+*.pt
+*.pth
+*.ckpt
+data/
+runs/
+outputs/
+wandb/
+.DS_Store
