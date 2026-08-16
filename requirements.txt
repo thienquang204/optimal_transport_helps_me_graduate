@@ -6,3 +6,7 @@ datasets==5.0.1
 huggingface-hub==1.27.0
 Pillow==12.3.0
 tqdm==4.67.1
+
+# Exact nearest-neighbour evaluation in csr_vs_mmpot_imagenet.py. Keep this
+# unpinned so pip can select a wheel compatible with the host Python/NumPy.
+faiss-cpu
