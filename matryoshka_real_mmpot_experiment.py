@@ -224,7 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--knn-normalize", action="store_true", help="L2-normalize each prefix before exact L2 search")
     bench.add_argument("--knn-max-train", type=int, default=0, help="limit gallery samples for development; 0 means all")
     bench.add_argument("--knn-max-val", type=int, default=0, help="limit query samples for development; 0 means all")
-    bench.add_argument("--probe-epochs", type=int, default=20)
+    bench.add_argument("--probe-epochs", type=int, default=5)
     bench.add_argument("--probe-lr", type=float, default=0.1)
     bench.add_argument("--probe-weight-decay", type=float, default=0.0)
     bench.add_argument("--probe-max-train-batches", type=int, default=0)
@@ -1235,6 +1235,7 @@ def run_linear_probe(
     device: torch.device,
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
+    # Freeze encoder for linear evaluation
     for parameter in model.encoder.parameters():
         parameter.requires_grad_(False)
     model.encoder.eval()
@@ -1244,59 +1245,66 @@ def run_linear_probe(
         probes.parameters(), lr=args.probe_lr, momentum=0.9, weight_decay=args.probe_weight_decay
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.probe_epochs)
-    for epoch in range(args.probe_epochs):
-        probes.train()
-        total_loss, samples = 0.0, 0
-        for batch_index, (images, labels) in enumerate(train_loader):
-            if batch_limit_reached(batch_index, args.probe_max_train_batches):
-                break
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            with torch.no_grad():
-                features = model.encode(images).detach()
-            logits = probes(features)
-            loss = torch.stack([F.cross_entropy(item, labels) for item in logits]).mean()
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-            total_loss += float(loss.detach()) * labels.shape[0]
-            samples += labels.shape[0]
-        if samples == 0:
-            raise RuntimeError("linear-probe training loader produced no samples")
-        scheduler.step()
-        print(f"linear-probe epoch={epoch + 1:03d} loss={total_loss / samples:.4f}", flush=True)
+    try:
+        for epoch in range(args.probe_epochs):
+            probes.train()
+            total_loss, samples = 0.0, 0
+            for batch_index, (images, labels) in enumerate(train_loader):
+                if batch_limit_reached(batch_index, args.probe_max_train_batches):
+                    break
+                images = images.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+                with torch.no_grad():
+                    features = model.encode(images).detach().float()
+                logits = probes(features)
+                loss = torch.stack([F.cross_entropy(item, labels) for item in logits]).mean()
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+                total_loss += float(loss.detach()) * labels.shape[0]
+                samples += labels.shape[0]
+            if samples == 0:
+                raise RuntimeError("linear-probe training loader produced no samples")
+            scheduler.step()
+            print(f"linear-probe epoch={epoch + 1:03d} loss={total_loss / samples:.4f}", flush=True)
 
-    probes.eval()
-    correct1 = [0] * len(model.nested_dims)
-    correct5 = [0] * len(model.nested_dims)
-    samples = 0
-    with torch.inference_mode():
-        for batch_index, (images, labels) in enumerate(val_loader):
-            if batch_limit_reached(batch_index, args.max_val_batches):
-                break
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            logits = probes(model.encode(images))
-            samples += labels.shape[0]
-            for index, item in enumerate(logits):
-                correct1[index] += topk_correct(item, labels, 1)
-                correct5[index] += topk_correct(item, labels, 5)
-    per_dim = {
-        str(dim): {
-            "top1": 100.0 * correct1[index] / samples,
-            "top5": 100.0 * correct5[index] / samples,
+        probes.eval()
+        correct1 = [0] * len(model.nested_dims)
+        correct5 = [0] * len(model.nested_dims)
+        val_samples = 0
+        with torch.inference_mode():
+            for batch_index, (images, labels) in enumerate(val_loader):
+                if batch_limit_reached(batch_index, args.max_val_batches):
+                    break
+                images = images.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+                features = model.encode(images).float()
+                logits = probes(features)
+                val_samples += labels.shape[0]
+                for index, item in enumerate(logits):
+                    correct1[index] += topk_correct(item, labels, 1)
+                    correct5[index] += topk_correct(item, labels, 5)
+        if val_samples == 0:
+            raise RuntimeError("linear-probe validation loader produced no samples")
+        per_dim = {
+            str(dim): {
+                "top1": 100.0 * correct1[idx] / val_samples,
+                "top5": 100.0 * correct5[idx] / val_samples,
+            }
+            for idx, dim in enumerate(model.nested_dims)
         }
-        for index, dim in enumerate(model.nested_dims)
-    }
-    for parameter in model.encoder.parameters():
-        parameter.requires_grad_(True)
+    finally:
+        # Always restore encoder to trainable + train mode regardless of errors
+        for parameter in model.encoder.parameters():
+            parameter.requires_grad_(True)
+        model.encoder.train()
     return {
         "protocol": "fresh_linear_heads_frozen_encoder_train_to_val",
         "preset_is_paper_exact": False,
         "epochs": args.probe_epochs,
         "lr": args.probe_lr,
         "weight_decay": args.probe_weight_decay,
-        "samples": samples,
+        "samples": val_samples,
         "per_dim": per_dim,
     }
 
@@ -1411,25 +1419,33 @@ def train_and_benchmark_method(
     if "knn" in args.benchmark:
         gallery_loader = make_loader(bundle.train_eval, args, shuffle=False, seed_offset=2)
         query_loader = make_loader(bundle.val, args, shuffle=False, seed_offset=3)
-        gallery, gallery_labels = extract_features(model, gallery_loader, device, args.knn_max_train)
-        queries, query_labels = extract_features(model, query_loader, device, args.knn_max_val)
-        results["knn"] = exact_l2_knn(
-            gallery,
-            gallery_labels,
-            queries,
-            query_labels,
-            dims,
-            args.knn_query_chunk,
-            args.knn_gallery_chunk,
-            args.knn_normalize,
-        )
+        try:
+            gallery, gallery_labels = extract_features(model, gallery_loader, device, args.knn_max_train)
+            queries, query_labels = extract_features(model, query_loader, device, args.knn_max_val)
+            results["knn"] = exact_l2_knn(
+                gallery,
+                gallery_labels,
+                queries,
+                query_labels,
+                dims,
+                args.knn_query_chunk,
+                args.knn_gallery_chunk,
+                args.knn_normalize,
+            )
+        finally:
+            # Explicitly delete loaders to release persistent workers (important on Windows)
+            del gallery_loader, query_loader
         del gallery, gallery_labels, queries, query_labels
     if "linear" in args.benchmark:
-        probe_train_loader = make_loader(bundle.train, args, shuffle=True, seed_offset=4)
+        # Use eval-transform (no augmentation) loader for reproducible linear probing
+        probe_train_loader = make_loader(bundle.train_eval, args, shuffle=True, seed_offset=4)
         probe_val_loader = make_loader(bundle.val, args, shuffle=False, seed_offset=5)
-        results["linear"] = run_linear_probe(
-            model, probe_train_loader, probe_val_loader, device, args
-        )
+        try:
+            results["linear"] = run_linear_probe(
+                model, probe_train_loader, probe_val_loader, device, args
+            )
+        finally:
+            del probe_train_loader, probe_val_loader
     atomic_json_dump(results, method_dir / "results.json")
     return results
 
@@ -1443,10 +1459,14 @@ def comparison_rows(results: Mapping[str, Dict[str, Any]]) -> List[Dict[str, Any
     for benchmark in ("head", "knn", "linear"):
         if benchmark not in baseline or benchmark not in novel:
             continue
+        base_per_dim = baseline[benchmark].get("per_dim", {})
+        novel_per_dim = novel[benchmark].get("per_dim", {})
         for dim in dims:
             dim_key = str(dim)
-            base_metrics = baseline[benchmark]["per_dim"][dim_key]
-            novel_metrics = novel[benchmark]["per_dim"][dim_key]
+            if dim_key not in base_per_dim or dim_key not in novel_per_dim:
+                continue
+            base_metrics = base_per_dim[dim_key]
+            novel_metrics = novel_per_dim[dim_key]
             for metric in sorted(set(base_metrics) & set(novel_metrics)):
                 if isinstance(base_metrics[metric], (int, float)):
                     rows.append(
