@@ -14,3 +14,4 @@ runs/
 outputs/
 wandb/
 .DS_Store
+.vscode

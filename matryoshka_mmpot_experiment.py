@@ -52,9 +52,15 @@ Notes
 * ``linear`` resets all classifiers, freezes the encoder, trains fresh probes
   on the training split, and evaluates them on validation.
 * ``knn`` uses the training split as the gallery and validation as queries,
-  with exact chunked L2 search for every prefix. Full ImageNet extraction can
-  require roughly 10 GiB of host RAM for float32 ResNet-50 features; use the
-  sample-limit flags for development runs.
+  with exact chunked L2 search for every prefix. Features stay on the GPU, so
+  full ImageNet extraction needs roughly 10 GiB of VRAM on top of the model for
+  float32 ResNet-50 features; use ``--knn-max-train``/``--knn-max-val`` to cap
+  it. ``knn`` is not part of the default ``--benchmark head``.
+* This runner is CUDA-only: ``--device`` defaults to ``cuda`` and rejects
+  ``cpu``/``mps``. Dataset decoding in the DataLoader workers still runs on the
+  host CPU, which PyTorch cannot avoid.
+* Training defaults to 5 epochs (``--epochs``) and the linear probe to 5 epochs
+  (``--probe-epochs``).
 * The OT solver runs per local mini-batch in float32. ``envelope`` gradients
   are the memory-efficient default: the converged plan is detached while the
   transport cost remains differentiable with respect to the cost matrix.
@@ -65,12 +71,14 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import itertools
 import json
 import math
 import os
 import random
 import sys
 import time
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -80,6 +88,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, models, transforms
+from tqdm.auto import tqdm
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -162,6 +171,11 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument("--hf-revision", default="main")
     data.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding a gated-dataset access token; cached hf login is also used")
     data.add_argument("--image-size", type=int, default=0, help="0 selects 224 for ImageNet/Fake and 32 for CIFAR")
+    data.add_argument(
+        "--require-validated-data",
+        action="store_true",
+        help="refuse ImageNet training unless the downloader manifest proves every train/validation image decoded",
+    )
     data.add_argument("--fake-train-size", type=int, default=1024)
     data.add_argument("--fake-val-size", type=int, default=256)
     data.add_argument("--fake-num-classes", type=int, default=10)
@@ -186,7 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
     ot.add_argument("--ot-scale-pairs", choices=("all", "adjacent"), default="all")
 
     train = parser.add_argument_group("training")
-    train.add_argument("--epochs", type=int, default=90)
+    train.add_argument("--epochs", type=int, default=5)
     train.add_argument("--batch-size", type=int, default=256)
     train.add_argument("--workers", type=int, default=8)
     train.add_argument("--optimizer", choices=("sgd", "adam", "adamw"), default="sgd")
@@ -201,10 +215,16 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--grad-clip", type=float, default=0.0)
     train.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     train.add_argument("--channels-last", action="store_true")
-    train.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:N, or mps")
+    train.add_argument("--device", default="cuda", help="cuda or cuda:N; this runner is CUDA-only")
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--deterministic", action="store_true")
     train.add_argument("--print-freq", type=int, default=50)
+    train.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show tqdm progress, throughput, and ETA for long-running loops",
+    )
     train.add_argument("--max-train-batches", type=int, default=0, help="0 means the full epoch")
     train.add_argument("--max-val-batches", type=int, default=0, help="0 means the full validation split")
 
@@ -222,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--knn-normalize", action="store_true", help="L2-normalize each prefix before exact L2 search")
     bench.add_argument("--knn-max-train", type=int, default=0, help="limit gallery samples for development; 0 means all")
     bench.add_argument("--knn-max-val", type=int, default=0, help="limit query samples for development; 0 means all")
-    bench.add_argument("--probe-epochs", type=int, default=20)
+    bench.add_argument("--probe-epochs", type=int, default=5)
     bench.add_argument("--probe-lr", type=float, default=0.1)
     bench.add_argument("--probe-weight-decay", type=float, default=0.0)
     bench.add_argument("--probe-max-train-batches", type=int, default=0)
@@ -261,18 +281,25 @@ def resolve_image_size(args: argparse.Namespace) -> int:
 
 
 def select_device(spec: str) -> torch.device:
-    if spec != "auto":
-        device = torch.device(spec)
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is unavailable")
-    if device.type == "mps" and not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
-        raise RuntimeError("MPS was requested but is unavailable")
+    """Resolve --device to a CUDA device. CPU and MPS execution are rejected."""
+    if spec == "auto":
+        spec = "cuda"
+    device = torch.device(spec)
+    if device.type != "cuda":
+        raise RuntimeError(
+            f"this runner is CUDA-only; --device={spec!r} is not supported. "
+            "Pass 'cuda' or 'cuda:N' and run on a machine with an NVIDIA GPU."
+        )
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA was requested but is unavailable. Install a CUDA-enabled torch "
+            "build and start the container with `--gpus all`."
+        )
+    if device.index is not None and device.index >= torch.cuda.device_count():
+        raise RuntimeError(
+            f"CUDA device index {device.index} was requested but only "
+            f"{torch.cuda.device_count()} device(s) are visible"
+        )
     return device
 
 
@@ -357,6 +384,38 @@ def build_datasets(args: argparse.Namespace, image_size: int) -> DatasetBundle:
                 "Accept its access terms at https://huggingface.co/datasets/ILSVRC/imagenet-1k, "
                 f"then run `hf auth login` or set {args.hf_token_env}. Original error: {exc}"
             ) from exc
+        if args.require_validated_data:
+            manifest_path = root / "imagenet_download_manifest.json"
+            if not manifest_path.is_file():
+                raise RuntimeError(
+                    f"validated-data gate failed: missing {manifest_path}; run download_imagenet.py --check-samples all"
+                )
+            with manifest_path.open(encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            failures = []
+            if not manifest.get("validation_passed"):
+                failures.append("manifest is not marked validation_passed")
+            for split_name, split in (("train", train_split), ("validation", val_split)):
+                result = manifest.get("splits", {}).get(split_name, {})
+                if result.get("validation_status") != "passed":
+                    failures.append(f"{split_name} status is not passed")
+                if not result.get("fully_checked") or result.get("decoded_samples_checked") != len(split):
+                    failures.append(f"{split_name} was not completely decoded")
+                if result.get("fingerprint") != getattr(split, "_fingerprint", None):
+                    failures.append(f"{split_name} fingerprint changed after validation")
+            if failures:
+                raise RuntimeError("validated-data gate failed: " + "; ".join(failures))
+            print(f"validated-data gate passed: {manifest_path}", flush=True)
+
+            # Known malformed EXIF metadata does not affect decoded RGB pixels.
+            # It was counted by the complete scan, so avoid repeating the same
+            # warning from every DataLoader worker during training.
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Corrupt EXIF data\..*",
+                category=UserWarning,
+                module=r"PIL\.TiffImagePlugin",
+            )
         label_feature = train_split.features["label"]
         classes = list(getattr(label_feature, "names", []) or [])
         if not classes:
@@ -755,8 +814,24 @@ def amp_context(device: torch.device, enabled: bool) -> Any:
     return contextlib.nullcontext()
 
 
-def batch_limit_reached(index: int, limit: int) -> bool:
-    return limit > 0 and index >= limit
+def progress_loader(
+    loader: DataLoader,
+    description: str,
+    *,
+    enabled: bool,
+    limit: int = 0,
+) -> Any:
+    total = min(len(loader), limit) if limit > 0 else len(loader)
+    iterable = itertools.islice(loader, total) if limit > 0 else loader
+    return tqdm(
+        iterable,
+        total=total,
+        desc=description,
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=1.0,
+        disable=not enabled,
+    )
 
 
 def train_one_epoch(
@@ -773,9 +848,13 @@ def train_one_epoch(
     samples = 0
     amp_enabled = bool(args.amp and device.type == "cuda")
     start = time.time()
-    for batch_index, (images, labels) in enumerate(loader):
-        if batch_limit_reached(batch_index, args.max_train_batches):
-            break
+    progress = progress_loader(
+        loader,
+        f"train epoch {epoch + 1:03d}",
+        enabled=args.progress,
+        limit=args.max_train_batches,
+    )
+    for batch_index, (images, labels) in enumerate(progress):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         if args.channels_last and images.ndim == 4:
@@ -798,12 +877,19 @@ def train_one_epoch(
         sums["ot"] += float(ot_loss.detach()) * count
         sums["mass"] += float(diagnostics["mass"].detach()) * count
         sums["cap"] += float(diagnostics["cap_violation"].detach()) * count
+        if batch_index % max(1, args.print_freq) == 0:
+            progress.set_postfix(
+                loss=f"{float(loss.detach()):.4f}",
+                mrl=f"{float(mrl_loss.detach()):.4f}",
+                ot=f"{float(ot_loss.detach()):.4f}",
+                refresh=False,
+            )
         if args.print_freq > 0 and (batch_index % args.print_freq == 0):
-            print(
+            tqdm.write(
                 f"epoch={epoch + 1:03d} batch={batch_index:05d} "
                 f"loss={float(loss.detach()):.4f} mrl={float(mrl_loss.detach()):.4f} "
                 f"ot={float(ot_loss.detach()):.4f} elapsed={time.time() - start:.1f}s",
-                flush=True,
+                file=sys.stdout,
             )
     if samples == 0:
         raise RuntimeError("training loader produced no samples")
@@ -829,6 +915,7 @@ def evaluate_heads(
     loader: DataLoader,
     device: torch.device,
     args: argparse.Namespace,
+    description: str = "evaluate heads",
 ) -> Dict[str, Any]:
     model.eval()
     correct1 = [0] * len(model.nested_dims)
@@ -836,9 +923,13 @@ def evaluate_heads(
     loss_sums = [0.0] * len(model.nested_dims)
     samples = 0
     amp_enabled = bool(args.amp and device.type == "cuda")
-    for batch_index, (images, labels) in enumerate(loader):
-        if batch_limit_reached(batch_index, args.max_val_batches):
-            break
+    progress = progress_loader(
+        loader,
+        description,
+        enabled=args.progress,
+        limit=args.max_val_batches,
+    )
+    for images, labels in progress:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         with amp_context(device, amp_enabled):
@@ -961,17 +1052,26 @@ def extract_features(
     loader: DataLoader,
     device: torch.device,
     max_samples: int,
+    description: str,
+    progress_enabled: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     model.eval()
     all_features: List[torch.Tensor] = []
     all_labels: List[torch.Tensor] = []
     seen = 0
-    for images, labels in loader:
+    max_batches = math.ceil(max_samples / loader.batch_size) if max_samples else 0
+    progress = progress_loader(
+        loader,
+        description,
+        enabled=progress_enabled,
+        limit=max_batches,
+    )
+    for images, labels in progress:
         if max_samples and seen >= max_samples:
             break
         images = images.to(device, non_blocking=True)
-        features = model.encode(images).float().cpu()
-        labels = labels.cpu()
+        features = model.encode(images).float()
+        labels = labels.to(device, non_blocking=True)
         if max_samples:
             remaining = max_samples - seen
             features, labels = features[:remaining], labels[:remaining]
@@ -993,6 +1093,7 @@ def exact_l2_knn(
     query_chunk: int,
     gallery_chunk: int,
     normalize: bool,
+    progress_enabled: bool,
 ) -> Dict[str, Any]:
     if query_chunk < 1 or gallery_chunk < 1:
         raise ValueError("kNN chunk sizes must be positive")
@@ -1004,10 +1105,26 @@ def exact_l2_knn(
             gallery_dim = F.normalize(gallery_dim, dim=1)
             query_dim = F.normalize(query_dim, dim=1)
         correct = 0
-        for query_start in range(0, query_dim.shape[0], query_chunk):
+        query_starts = range(0, query_dim.shape[0], query_chunk)
+        query_progress = tqdm(
+            query_starts,
+            total=len(query_starts),
+            desc=f"1-NN dim {dim}",
+            unit="chunk",
+            dynamic_ncols=True,
+            mininterval=1.0,
+            disable=not progress_enabled,
+        )
+        for query_start in query_progress:
             query_batch = query_dim[query_start : query_start + query_chunk]
-            best_distance = torch.full((query_batch.shape[0],), float("inf"))
-            best_label = torch.empty((query_batch.shape[0],), dtype=gallery_labels.dtype)
+            best_distance = torch.full(
+                (query_batch.shape[0],), float("inf"), device=query_batch.device
+            )
+            best_label = torch.empty(
+                (query_batch.shape[0],),
+                dtype=gallery_labels.dtype,
+                device=gallery_labels.device,
+            )
             query_norm = (query_batch * query_batch).sum(dim=1)
             for gallery_start in range(0, gallery_dim.shape[0], gallery_chunk):
                 gallery_batch = gallery_dim[gallery_start : gallery_start + gallery_chunk]
@@ -1062,9 +1179,13 @@ def run_linear_probe(
     for epoch in range(args.probe_epochs):
         probes.train()
         total_loss, samples = 0.0, 0
-        for batch_index, (images, labels) in enumerate(train_loader):
-            if batch_limit_reached(batch_index, args.probe_max_train_batches):
-                break
+        progress = progress_loader(
+            train_loader,
+            f"linear probe epoch {epoch + 1:03d}/{args.probe_epochs:03d}",
+            enabled=args.progress,
+            limit=args.probe_max_train_batches,
+        )
+        for images, labels in progress:
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             with torch.no_grad():
@@ -1076,6 +1197,7 @@ def run_linear_probe(
             optimizer.step()
             total_loss += float(loss.detach()) * labels.shape[0]
             samples += labels.shape[0]
+            progress.set_postfix(loss=f"{total_loss / samples:.4f}", refresh=False)
         if samples == 0:
             raise RuntimeError("linear-probe training loader produced no samples")
         scheduler.step()
@@ -1086,9 +1208,13 @@ def run_linear_probe(
     correct5 = [0] * len(model.nested_dims)
     samples = 0
     with torch.inference_mode():
-        for batch_index, (images, labels) in enumerate(val_loader):
-            if batch_limit_reached(batch_index, args.max_val_batches):
-                break
+        progress = progress_loader(
+            val_loader,
+            "linear probe validation",
+            enabled=args.progress,
+            limit=args.max_val_batches,
+        )
+        for images, labels in progress:
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             logits = probes(model.encode(images))
@@ -1170,7 +1296,9 @@ def train_and_benchmark_method(
     for epoch in range(start_epoch, args.epochs):
         epoch_lr = optimizer.param_groups[0]["lr"]
         train_stats = train_one_epoch(model, train_loader, optimizer, scaler, device, args, epoch)
-        head_stats = evaluate_heads(model, val_loader, device, args)
+        head_stats = evaluate_heads(
+            model, val_loader, device, args, f"validation epoch {epoch + 1:03d}"
+        )
         final_head = head_stats
         if scheduler is not None:
             scheduler.step()
@@ -1220,14 +1348,28 @@ def train_and_benchmark_method(
         "checkpoint": str(selected_checkpoint) if selected_checkpoint.is_file() else None,
     }
     if "head" in args.benchmark:
-        results["head"] = evaluate_heads(model, val_loader, device, args)
+        results["head"] = evaluate_heads(model, val_loader, device, args, "head benchmark")
     elif final_head is not None:
         results["last_epoch_head"] = final_head
     if "knn" in args.benchmark:
         gallery_loader = make_loader(bundle.train_eval, args, shuffle=False, seed_offset=2)
         query_loader = make_loader(bundle.val, args, shuffle=False, seed_offset=3)
-        gallery, gallery_labels = extract_features(model, gallery_loader, device, args.knn_max_train)
-        queries, query_labels = extract_features(model, query_loader, device, args.knn_max_val)
+        gallery, gallery_labels = extract_features(
+            model,
+            gallery_loader,
+            device,
+            args.knn_max_train,
+            "kNN gallery features",
+            args.progress,
+        )
+        queries, query_labels = extract_features(
+            model,
+            query_loader,
+            device,
+            args.knn_max_val,
+            "kNN query features",
+            args.progress,
+        )
         results["knn"] = exact_l2_knn(
             gallery,
             gallery_labels,
@@ -1237,6 +1379,7 @@ def train_and_benchmark_method(
             args.knn_query_chunk,
             args.knn_gallery_chunk,
             args.knn_normalize,
+            args.progress,
         )
         del gallery, gallery_labels, queries, query_labels
     if "linear" in args.benchmark:

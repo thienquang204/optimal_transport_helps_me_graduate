@@ -2,9 +2,14 @@
 set -Eeuo pipefail
 
 # Host-side A-Z runner. It builds the image with sudo, keeps ImageNet in a
-# Docker named volume, writes checkpoints to ./runs, and starts the full
-# download/train/benchmark pipeline in the foreground by default. This is
-# intended for tmux, where all download and training output stays visible.
+# Docker named volume, writes every checkpoint and metric file to the host
+# directory $OUTPUT_ROOT (bind-mounted at /output inside the container), and
+# starts the full download/train/benchmark pipeline in the foreground by
+# default. This is intended for tmux, where all output stays visible.
+#
+# Results always land outside Docker: $OUTPUT_ROOT is created with sudo when
+# needed, the container chowns /output back to the calling user on exit, and
+# the runner re-applies ownership afterwards so nothing is left root-owned.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -16,6 +21,9 @@ DATA_VOLUME="${DATA_VOLUME:-imagenet-data}"
 ENV_FILE="${ENV_FILE:-.env}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRIPT_DIR/runs}"
 RESTART_LIMIT="${RESTART_LIMIT:-20}"
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
+HOST_UID="${HOST_UID:-$(id -u)}"
+HOST_GID="${HOST_GID:-$(id -g)}"
 
 die() {
     echo "Error: $*" >&2
@@ -45,15 +53,93 @@ show_status() {
         "$CONTAINER_NAME"
 }
 
+# Create $ENV_FILE from .env.example on the first run, filling in HF_TOKEN from
+# the environment when it is exported, so `start` needs no manual setup step.
+bootstrap_env_file() {
+    if [[ -f "$ENV_FILE" ]]; then
+        return 0
+    fi
+    [[ -f .env.example ]] || die "$ENV_FILE does not exist and .env.example is missing"
+    echo "Creating $ENV_FILE from .env.example..."
+    cp .env.example "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    if [[ -n "${HF_TOKEN:-}" ]]; then
+        # Rewrite in place without leaking the token onto the command line.
+        HF_TOKEN="$HF_TOKEN" ENV_FILE="$ENV_FILE" python3 - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["ENV_FILE"])
+token = os.environ["HF_TOKEN"]
+lines = [
+    f"HF_TOKEN={token}" if line.startswith("HF_TOKEN=") else line
+    for line in path.read_text().splitlines()
+]
+path.write_text("\n".join(lines) + "\n")
+PY
+        echo "HF_TOKEN copied from the environment into $ENV_FILE."
+    else
+        die "$ENV_FILE was created; put your Hugging Face token in HF_TOKEN and rerun"
+    fi
+}
+
+# Create the host results directory and make sure the calling user owns it,
+# falling back to sudo when the parent directory is not user-writable.
+prepare_output_root() {
+    if [[ ! -d "$OUTPUT_ROOT" ]]; then
+        mkdir -p "$OUTPUT_ROOT" 2>/dev/null || {
+            echo "Creating $OUTPUT_ROOT with sudo..."
+            sudo mkdir -p "$OUTPUT_ROOT" || die "could not create $OUTPUT_ROOT"
+        }
+    fi
+    if [[ ! -w "$OUTPUT_ROOT" ]]; then
+        echo "Taking ownership of $OUTPUT_ROOT with sudo..."
+        sudo chown "${HOST_UID}:${HOST_GID}" "$OUTPUT_ROOT" || die "could not chown $OUTPUT_ROOT"
+    fi
+    OUTPUT_ROOT="$(cd "$OUTPUT_ROOT" && pwd)"
+}
+
+# Anything the container wrote as root is handed back to the calling user, so
+# the results are usable outside Docker without sudo. Safe to run repeatedly.
+claim_results() {
+    [[ -d "$OUTPUT_ROOT" ]] || return 0
+    if find "$OUTPUT_ROOT" ! -user "$HOST_UID" -print -quit 2>/dev/null | grep -q .; then
+        echo "Reclaiming root-owned result files in $OUTPUT_ROOT with sudo..."
+        sudo chown -R "${HOST_UID}:${HOST_GID}" "$OUTPUT_ROOT" || \
+            echo "Warning: chown of $OUTPUT_ROOT failed; use sudo to read the results" >&2
+    fi
+}
+
+show_results() {
+    [[ -d "$OUTPUT_ROOT" ]] || die "$OUTPUT_ROOT does not exist yet"
+    claim_results
+    echo "Host results directory: $OUTPUT_ROOT"
+    echo
+    local found=0
+    while IFS= read -r path; do
+        found=1
+        printf '  %s\n' "$path"
+    done < <(find "$OUTPUT_ROOT" -maxdepth 4 \
+        \( -name "summary.json" -o -name "comparison.csv" -o -name "results.json" \
+           -o -name "run_manifest.txt" -o -name "*_train.log" -o -name "best.pt" \) \
+        2>/dev/null | sort)
+    if [[ "$found" -eq 0 ]]; then
+        echo "  (no result files yet)"
+    fi
+    echo
+    echo "Disk usage: $(du -sh "$OUTPUT_ROOT" 2>/dev/null | cut -f1)"
+}
+
 preflight() {
     command -v sudo >/dev/null 2>&1 || die "sudo is not installed"
     command -v docker >/dev/null 2>&1 || die "docker is not installed"
     sudo -v
     docker_sudo info >/dev/null 2>&1 || die "Docker daemon is not running"
-    [[ -f "$ENV_FILE" ]] || die "$ENV_FILE does not exist; create it from .env.example"
+    bootstrap_env_file
     grep -q '^HF_TOKEN=hf_' "$ENV_FILE" || die "$ENV_FILE does not contain a valid-looking HF_TOKEN"
-    mkdir -p "$OUTPUT_ROOT"
-    OUTPUT_ROOT="$(cd "$OUTPUT_ROOT" && pwd)"
+    docker_sudo info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia || \
+        echo "Warning: no 'nvidia' Docker runtime detected. This pipeline is GPU-only and will abort without one." >&2
+    prepare_output_root
 }
 
 build_image() {
@@ -117,6 +203,8 @@ start_pipeline() {
             --gpus all \
             --shm-size=16g \
             --env-file "$ENV_FILE" \
+            -e "HOST_UID=${HOST_UID}" \
+            -e "HOST_GID=${HOST_GID}" \
             -v "${DATA_VOLUME}:/data" \
             -v "${OUTPUT_ROOT}:/output" \
             --entrypoint /bin/bash \
@@ -127,22 +215,54 @@ start_pipeline() {
         echo "Full pipeline started in the background."
         show_status
         echo "Logs:       $0 logs"
+        echo "Results:    $0 results  (host directory $OUTPUT_ROOT)"
     else
         echo "[3/3] Entering the container and streaming the full pipeline output..."
         echo "In tmux, detach with Ctrl+B then D. Do not press Ctrl+C unless you want to stop it."
         echo "Dataset:     Docker volume '$DATA_VOLUME'"
-        echo "Checkpoints root: $OUTPUT_ROOT (see OUTPUT_DIR in .env/container log)"
+        echo "Results root: $OUTPUT_ROOT on the host (see OUTPUT_DIR in .env/container log)"
         echo
-        docker_sudo run -it \
-            --name "$CONTAINER_NAME" \
-            --gpus all \
-            --shm-size=16g \
-            --env-file "$ENV_FILE" \
-            -v "${DATA_VOLUME}:/data" \
-            -v "${OUTPUT_ROOT}:/output" \
-            --entrypoint /bin/bash \
-            "$IMAGE_NAME" \
-            /app/container_pipeline.sh
+
+        # Every trainer invocation uses --resume auto, so a crashed run picks up
+        # from its last checkpoint. Retry automatically instead of asking the
+        # user to babysit the terminal.
+        local run_status=0 attempt=1
+        while true; do
+            if [[ "$attempt" -gt 1 ]]; then
+                echo
+                echo "Attempt ${attempt}/${MAX_ATTEMPTS}: resuming from the last checkpoint..."
+                docker_sudo rm --force "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            fi
+
+            run_status=0
+            docker_sudo run -it \
+                --name "$CONTAINER_NAME" \
+                --gpus all \
+                --shm-size=16g \
+                --env-file "$ENV_FILE" \
+                -e "HOST_UID=${HOST_UID}" \
+                -e "HOST_GID=${HOST_GID}" \
+                -v "${DATA_VOLUME}:/data" \
+                -v "${OUTPUT_ROOT}:/output" \
+                --entrypoint /bin/bash \
+                "$IMAGE_NAME" \
+                /app/container_pipeline.sh || run_status=$?
+
+            # 3 is the "/output is not mounted" guard and 130 is Ctrl+C: both
+            # are configuration/user decisions that a retry cannot fix.
+            if [[ "$run_status" -eq 0 || "$run_status" -eq 3 || "$run_status" -eq 130 ]]; then
+                break
+            fi
+            if [[ "$attempt" -ge "$MAX_ATTEMPTS" ]]; then
+                echo "Pipeline still failing after ${MAX_ATTEMPTS} attempt(s) (exit ${run_status})." >&2
+                break
+            fi
+            attempt=$((attempt + 1))
+        done
+
+        echo
+        show_results
+        return "$run_status"
     fi
 }
 
@@ -170,6 +290,17 @@ case "$ACTION" in
         else
             echo "Pipeline is not running."
         fi
+        claim_results
+        ;;
+    results)
+        sudo -v
+        show_results
+        ;;
+    fix-perms)
+        sudo -v
+        prepare_output_root
+        sudo chown -R "${HOST_UID}:${HOST_GID}" "$OUTPUT_ROOT"
+        echo "Ownership of $OUTPUT_ROOT set to ${HOST_UID}:${HOST_GID}."
         ;;
     restart)
         preflight
@@ -179,7 +310,10 @@ case "$ACTION" in
         start_pipeline foreground
         ;;
     *)
-        echo "Usage: $0 {start|background|status|logs|stop|restart}" >&2
+        echo "Usage: $0 {start|background|status|logs|stop|restart|results|fix-perms}" >&2
+        echo >&2
+        echo "  results     list the host-side result files and reclaim their ownership" >&2
+        echo "  fix-perms   chown \$OUTPUT_ROOT back to the calling user (sudo)" >&2
         exit 2
         ;;
 esac

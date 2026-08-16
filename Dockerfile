@@ -17,7 +17,8 @@ COPY requirements.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install --requirement requirements.txt
 
-COPY matryoshka_mmpot_experiment.py download_imagenet.py container_pipeline.sh ./
+COPY matryoshka_real_mmpot_experiment.py matryoshka_mmpot_experiment.py \
+     download_imagenet.py container_pipeline.sh ./
 
 RUN chmod +x /app/container_pipeline.sh
 
@@ -25,5 +26,5 @@ RUN mkdir -p /data/huggingface /data/torch /output
 
 VOLUME ["/data", "/output"]
 
-ENTRYPOINT ["python", "/app/matryoshka_mmpot_experiment.py"]
+ENTRYPOINT ["python", "/app/matryoshka_real_mmpot_experiment.py"]
 CMD ["--help"]
