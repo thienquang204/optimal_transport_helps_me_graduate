@@ -1,45 +1,20 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Complete launcher for csr_vs_mmpot_imagenet.py.
-#
-# Basic use:
-#   ./run_full_pipeline.sh /data/imagenet
-#
-# Configure common parameters without editing this file:
-#   DATA_ROOT=/data/imagenet MAX_TRAIN=50000 MAX_VAL=10000 EPOCHS=3 \
-#     BATCH_SIZE=256 ./run_full_pipeline.sh
-#
-# Additional Python arguments can be appended and take precedence:
-#   ./run_full_pipeline.sh /data/imagenet --epochs 5 --method mmpot
+# Docker launcher for csr_vs_mmpot_imagenet.py. ImageNet is read from the
+# existing Docker named volume; no host /data directory is required.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-
-if [[ -z "${DATA_ROOT:-}" && $# -gt 0 && "$1" != -* ]]; then
-    DATA_ROOT="$1"
-    shift
-fi
-
-if [[ -z "${DATA_ROOT:-}" ]]; then
-    echo "Usage: $0 /path/to/imagenet [experiment arguments...]" >&2
-    echo "   or: DATA_ROOT=/path/to/imagenet $0 [experiment arguments...]" >&2
-    exit 2
-fi
+IMAGE_NAME="${IMAGE_NAME:-matryoshka-mmpot:latest}"
+DATA_VOLUME="${DATA_VOLUME:-imagenet-data}"
+DATA_ROOT="${DATA_ROOT:-/data/huggingface}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRIPT_DIR/runs}"
+ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 
 # ---------------------------------------------------------------------------
-# DEFAULT EXPERIMENT SETTINGS — edit these values directly if desired.
-# Environment variables or trailing CLI arguments can still override them.
+# EXPERIMENT SETTINGS — edit here, set environment variables, or append CLI
+# flags to this script. Appended flags take precedence for scalar arguments.
 # ---------------------------------------------------------------------------
-
-# Dataset and storage
-export DATA_BACKEND="${DATA_BACKEND:-imagefolder}"
-export CACHE_DIR="${CACHE_DIR:-$SCRIPT_DIR/runs/csr_mmpot/resnet18_cache}"
-export OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/runs/csr_mmpot}"
-export WEIGHTS_CACHE="${WEIGHTS_CACHE:-$SCRIPT_DIR/weights}"
-export INSTALL_DEPS="${INSTALL_DEPS:-1}"
-
-# Full ImageNet paper-scale defaults. Use positive MAX_TRAIN/MAX_VAL values for
-# a smaller development subset; zero means use the complete corresponding split.
 MAX_TRAIN="${MAX_TRAIN:-0}"
 MAX_VAL="${MAX_VAL:-0}"
 EPOCHS="${EPOCHS:-10}"
@@ -50,8 +25,7 @@ HIDDEN_DIM="${HIDDEN_DIM:-2048}"
 TRAIN_K="${TRAIN_K:-32}"
 TOPK="${TOPK:-8,16,32,64,128,256}"
 METHOD="${METHOD:-both}"
-DEVICE="${DEVICE:-auto}"
-REBUILD_CACHE="${REBUILD_CACHE:-0}"
+DEVICE="${DEVICE:-cuda}"
 LEARNING_RATE="${LEARNING_RATE:-4e-5}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
 CONTRAST_WEIGHT="${CONTRAST_WEIGHT:-0.1}"
@@ -63,8 +37,31 @@ OT_ITERS="${OT_ITERS:-100}"
 OT_MICROBATCH="${OT_MICROBATCH:-32}"
 SEED="${SEED:-42}"
 AMP="${AMP:-1}"
+REBUILD_CACHE="${REBUILD_CACHE:-0}"
 
-args=(
+die() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+command -v docker >/dev/null 2>&1 || die "docker is not installed"
+
+docker_cmd=(docker)
+if ! docker info >/dev/null 2>&1; then
+    command -v sudo >/dev/null 2>&1 || die "cannot access Docker and sudo is unavailable"
+    sudo docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
+    docker_cmd=(sudo docker)
+fi
+
+"${docker_cmd[@]}" volume inspect "$DATA_VOLUME" >/dev/null 2>&1 || \
+    die "Docker volume '$DATA_VOLUME' does not exist; run run_imagenet_download.sh first"
+
+mkdir -p "$OUTPUT_ROOT"
+
+echo "Building $IMAGE_NAME with the CSR/MMPOT dependencies (including faiss-cpu)..."
+"${docker_cmd[@]}" build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+
+python_args=(
     --max-train "$MAX_TRAIN"
     --max-val "$MAX_VAL"
     --epochs "$EPOCHS"
@@ -88,30 +85,62 @@ args=(
     --seed "$SEED"
 )
 
-if [[ "$REBUILD_CACHE" == "1" ]]; then
-    args+=(--rebuild-cache)
-elif [[ "$REBUILD_CACHE" != "0" ]]; then
-    echo "Error: REBUILD_CACHE must be 0 or 1." >&2
-    exit 2
+case "$AMP" in
+    1) python_args+=(--amp) ;;
+    0) python_args+=(--no-amp) ;;
+    *) die "AMP must be 0 or 1" ;;
+esac
+
+case "$REBUILD_CACHE" in
+    1) python_args+=(--rebuild-cache) ;;
+    0) ;;
+    *) die "REBUILD_CACHE must be 0 or 1" ;;
+esac
+
+python_args+=("$@")
+
+docker_args=(
+    run --rm
+    --gpus all
+    --shm-size=16g
+    -v "$DATA_VOLUME:/data"
+    -v "$OUTPUT_ROOT:/output"
+    -v "$SCRIPT_DIR:/workspace:ro"
+)
+
+if [[ -f "$ENV_FILE" ]]; then
+    docker_args+=(--env-file "$ENV_FILE")
 fi
-
-if [[ "$AMP" == "1" ]]; then
-    args+=(--amp)
-elif [[ "$AMP" == "0" ]]; then
-    args+=(--no-amp)
-else
-    echo "Error: AMP must be 0 or 1." >&2
-    exit 2
+if [[ -n "${HF_TOKEN:-}" ]]; then
+    docker_args+=(-e HF_TOKEN)
 fi
+docker_args+=(
+    -e DATA_BACKEND=hf
+    -e CACHE_DIR=/output/csr_mmpot/resnet18_cache
+    -e OUTPUT_DIR=/output/csr_mmpot/results
+    -e WEIGHTS_CACHE=/output/csr_mmpot/weights
+    -e INSTALL_DEPS=1
+)
 
-# User-supplied CLI options come last, so argparse uses them as overrides for
-# ordinary scalar parameters such as --epochs and --batch-size.
-args+=("$@")
+echo "Running frozen ResNet-18 CSR vs MMPOT"
+echo "  ImageNet volume: $DATA_VOLUME mounted at /data"
+echo "  dataset cache:   $DATA_ROOT"
+echo "  host results:    $OUTPUT_ROOT"
+echo "  train/val limit: $MAX_TRAIN / $MAX_VAL (0 means full split)"
 
-echo "CSR vs MMPOT full pipeline (frozen torchvision ResNet-18)"
-echo "  max train/val: $MAX_TRAIN / $MAX_VAL (0 means the full split)"
-echo "  epochs/batch:  $EPOCHS / $BATCH_SIZE"
-echo "  method/device: $METHOD / $DEVICE"
-echo "  rebuild cache: $REBUILD_CACHE"
+run_status=0
+"${docker_cmd[@]}" "${docker_args[@]}" \
+    --entrypoint bash \
+    "$IMAGE_NAME" \
+    /workspace/run_csr_vs_mmpot_imagenet.sh "$DATA_ROOT" \
+    "${python_args[@]}" || run_status=$?
 
-exec bash "$SCRIPT_DIR/run_csr_vs_mmpot_imagenet.sh" "$DATA_ROOT" "${args[@]}"
+# The experiment runs as root so it can reuse the existing named-volume cache.
+# Use a short container operation to return bind-mounted files to the server
+# user whether Docker itself needs sudo or not.
+"${docker_cmd[@]}" run --rm \
+    -v "$OUTPUT_ROOT:/output" \
+    --entrypoint chown \
+    "$IMAGE_NAME" -R "$(id -u):$(id -g)" /output || true
+
+exit "$run_status"
