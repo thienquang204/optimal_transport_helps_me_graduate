@@ -23,7 +23,9 @@ OT_MARGINALS="${OT_MARGINALS:-3}"
 OT_SOLVER_MODE="${OT_SOLVER_MODE:-cyclic}"
 BENCHMARKS="${BENCHMARKS:-head,linear}"
 DEVICE="${DEVICE:-cuda}"
-OPTIMIZERS="${OPTIMIZERS:-sgd,adam}"
+# SGD only by default. Set OPTIMIZERS=sgd,adam to also run an Adam arm.
+OPTIMIZERS="${OPTIMIZERS:-sgd}"
+SUMMARIZE_SCRIPT="${SUMMARIZE_SCRIPT:-/app/summarize_results.py}"
 MOMENTUM="${MOMENTUM:-0.9}"
 ADAM_BETA1="${ADAM_BETA1:-0.9}"
 ADAM_BETA2="${ADAM_BETA2:-0.999}"
@@ -255,6 +257,15 @@ find "$OUTPUT_DIR" -maxdepth 3 \
     \( -name "summary.json" -o -name "comparison.csv" -o -name "results.json" \
        -o -name "history.jsonl" -o -name "run_manifest.txt" -o -name "*_train.log" \) \
     -print | sort | tee "$OUTPUT_DIR/result_files.txt"
+
+# Print the MRL vs MMPOT tables, and keep a copy next to the raw results so the
+# same tables survive an rsync without rerunning anything.
+if [[ -f "$SUMMARIZE_SCRIPT" ]]; then
+    echo
+    python "$SUMMARIZE_SCRIPT" "$OUTPUT_DIR" --metric all | tee "$OUTPUT_DIR/results_table.txt"
+else
+    echo "note: $SUMMARIZE_SCRIPT not found; skipping the results table" >&2
+fi
 
 echo
 echo "All optimizer runs completed successfully."

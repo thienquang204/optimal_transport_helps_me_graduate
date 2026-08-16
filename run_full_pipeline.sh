@@ -110,9 +110,30 @@ claim_results() {
     fi
 }
 
+# Print the MRL vs MMPOT tables on the host. summarize_results.py is stdlib
+# only, so no torch/venv is needed here; fall back to the copy the container
+# already wrote when this machine has no python3 at all.
+show_table() {
+    local metric="${1:-top1,top5}"
+    if command -v python3 >/dev/null 2>&1 && [[ -f "$SCRIPT_DIR/summarize_results.py" ]]; then
+        python3 "$SCRIPT_DIR/summarize_results.py" "$OUTPUT_ROOT" --metric "$metric" || true
+        return 0
+    fi
+    local cached
+    cached="$(find "$OUTPUT_ROOT" -name results_table.txt -print -quit 2>/dev/null || true)"
+    if [[ -n "$cached" ]]; then
+        echo "(python3 unavailable; showing the table the container saved)"
+        cat "$cached"
+    else
+        echo "(no python3 and no saved results_table.txt; skipping the table)"
+    fi
+}
+
 show_results() {
     [[ -d "$OUTPUT_ROOT" ]] || die "$OUTPUT_ROOT does not exist yet"
     claim_results
+    show_table
+    echo
     echo "Host results directory: $OUTPUT_ROOT"
     echo
     local found=0
@@ -121,13 +142,17 @@ show_results() {
         printf '  %s\n' "$path"
     done < <(find "$OUTPUT_ROOT" -maxdepth 4 \
         \( -name "summary.json" -o -name "comparison.csv" -o -name "results.json" \
-           -o -name "run_manifest.txt" -o -name "*_train.log" -o -name "best.pt" \) \
+           -o -name "run_manifest.txt" -o -name "results_table.txt" \
+           -o -name "*_train.log" -o -name "best.pt" \) \
         2>/dev/null | sort)
     if [[ "$found" -eq 0 ]]; then
         echo "  (no result files yet)"
     fi
     echo
     echo "Disk usage: $(du -sh "$OUTPUT_ROOT" 2>/dev/null | cut -f1)"
+    echo
+    echo "Copy to your machine with:"
+    echo "  rsync -avhP --info=progress2 $(id -un)@$(hostname -s 2>/dev/null || hostname):${OUTPUT_ROOT}/ ./runs/"
 }
 
 preflight() {
@@ -296,6 +321,10 @@ case "$ACTION" in
         sudo -v
         show_results
         ;;
+    table)
+        # Tables only: no sudo, no chown, safe to run while training continues.
+        show_table "${2:-all}"
+        ;;
     fix-perms)
         sudo -v
         prepare_output_root
@@ -310,9 +339,10 @@ case "$ACTION" in
         start_pipeline foreground
         ;;
     *)
-        echo "Usage: $0 {start|background|status|logs|stop|restart|results|fix-perms}" >&2
+        echo "Usage: $0 {start|background|status|logs|stop|restart|results|table|fix-perms}" >&2
         echo >&2
-        echo "  results     list the host-side result files and reclaim their ownership" >&2
+        echo "  results     print the result tables, list the files, reclaim ownership" >&2
+        echo "  table [m]   print only the MRL vs MMPOT tables (m: top1, all, ...)" >&2
         echo "  fix-perms   chown \$OUTPUT_ROOT back to the calling user (sudo)" >&2
         exit 2
         ;;

@@ -1670,9 +1670,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     rows = comparison_rows(method_results)
     write_comparison_csv(rows, args.output_dir / "comparison.csv")
+    # Report what was actually solved: this runner does a true multi-marginal
+    # tensor solve at --ot-marginals 3 and only degrades to the plan's pairwise
+    # proxy at 2, so the old hard-coded "proxy" label would misreport a 3-marginal run.
+    fidelity = (
+        f"true_rank_{args.ot_marginals}_multi_marginal_partial_OT_tensor"
+        if args.ot_marginals >= 3
+        else "pairwise_BxB_partial_OT_proxy_from_Matryoshka_plan_not_full_rank_m_tensor"
+    )
     summary = {
         "experiment": "Matryoshka-MMPOT_vs_MRL",
-        "mmpot_fidelity": "pairwise_BxB_partial_OT_proxy_from_Matryoshka_plan_not_full_rank_m_tensor",
+        "mmpot_fidelity": fidelity,
+        "ot_marginals": args.ot_marginals,
         "dataset": {
             "name": args.dataset,
             "train_samples": len(bundle.train),
