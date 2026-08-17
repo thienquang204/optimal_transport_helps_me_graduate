@@ -67,25 +67,21 @@ case "$FAISS_GPU" in
 esac
 
 if (( ${#missing_modules[@]} > 0 )); then
+    if [[ "$FAISS_GPU" == "1" ]] && printf '%s\n' "${missing_modules[@]}" | grep -qx faiss; then
+        echo "Error: CUDA FAISS is missing from this image." >&2
+        echo "Rebuild it with run_full_pipeline.sh; GX10/ARM64 FAISS must be compiled at image build time." >&2
+        exit 1
+    fi
     if [[ "$INSTALL_DEPS" != "1" ]]; then
         echo "Error: missing Python modules: ${missing_modules[*]}" >&2
         echo "Install requirements.txt or rerun with INSTALL_DEPS=1." >&2
         exit 1
     fi
     echo "Installing missing Python dependencies: ${missing_modules[*]}"
-    if [[ "$FAISS_GPU" == "1" ]] && "$PYTHON_BIN" -c "import faiss; raise SystemExit(0 if not hasattr(faiss, 'StandardGpuResources') else 1)" >/dev/null 2>&1; then
-        # CPU and GPU wheels both provide the `faiss` module and must not be
-        # overlaid in one environment.
-        "$PYTHON_BIN" -m pip uninstall --yes faiss-cpu
-    fi
     if (( ${#missing_modules[@]} == 1 )) && [[ "${missing_modules[0]}" == "faiss" ]]; then
         # Avoid reinstalling the large, platform-specific PyTorch stack when
         # an existing research environment only lacks the FAISS evaluator.
-        if [[ "$FAISS_GPU" == "1" ]]; then
-            "$PYTHON_BIN" -m pip install faiss-gpu-cu12
-        else
-            "$PYTHON_BIN" -m pip install faiss-cpu
-        fi
+        "$PYTHON_BIN" -m pip install faiss-cpu
     else
         "$PYTHON_BIN" -m pip install --requirement "$SCRIPT_DIR/requirements.txt"
     fi
@@ -104,7 +100,7 @@ if [[ "$FAISS_GPU" == "1" ]]; then
         exit 1
     }
     "$PYTHON_BIN" -c "import faiss; assert hasattr(faiss, 'StandardGpuResources'), 'FAISS is CPU-only'" || {
-        echo "Error: CUDA-enabled FAISS is required. Install faiss-gpu-cu12." >&2
+        echo "Error: CUDA-enabled FAISS is required; rebuild the project image." >&2
         exit 1
     }
 fi

@@ -61,7 +61,7 @@ fi
 mkdir -p "$OUTPUT_ROOT"
 
 echo "Building $IMAGE_NAME with the CSR/MMPOT dependencies (including CUDA FAISS)..."
-"${docker_cmd[@]}" build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+BUILDX_GIT_INFO=false "${docker_cmd[@]}" build --provenance=false --pull -t "$IMAGE_NAME" "$SCRIPT_DIR"
 
 python_args=(
     --max-train "$MAX_TRAIN"
