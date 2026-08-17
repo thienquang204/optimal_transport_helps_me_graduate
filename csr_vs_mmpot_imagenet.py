@@ -5,12 +5,14 @@ Pipeline
 --------
 1. Download/cache torchvision's pretrained ResNet-18 weights locally.
 2. Freeze the backbone and cache deterministic ImageNet train/validation features.
-3. Train two identically initialized tied Top-K sparse autoencoders:
+3. Train identically initialized tied Top-K sparse autoencoders:
    - ``csr``: reconstruction + cross-sparsity non-negative InfoNCE.
-   - ``mmpot``: reconstruction + multimarginal partial matching gap (M3PG).
+   - ``mmpot``: one model per requested MMPOT loss weight, using reconstruction
+     + multimarginal partial matching gap (M3PG).
 4. Encode the train split as the gallery and validation split as queries.
 5. Evaluate exact L2 1-NN with FAISS ``IndexFlatL2`` at every requested Top-K.
-6. Save checkpoints, histories, JSON results, and a comparison CSV.
+6. Select the MMPOT weight by mean validation accuracy across Top-K settings.
+7. Save isolated checkpoints, histories, JSON/CSV results, and PNG/PDF plots.
 
 The MMPOT arm treats Top-K, Top-2K, and Top-4K codes of the same frozen image
 embedding as three aligned views.  Its multiway cost is the circular-variance
@@ -76,6 +78,16 @@ def parse_ints(value: str) -> List[int]:
     return sorted(set(result))
 
 
+def parse_floats(value: str) -> List[float]:
+    try:
+        result = [float(x.strip()) for x in value.split(",") if x.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected comma-separated numbers") from exc
+    if not result or any(not math.isfinite(x) or x <= 0 for x in result):
+        raise argparse.ArgumentTypeError("values must be finite and positive")
+    return sorted(set(result))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Frozen RN18 + Top-K SAE: CSR InfoNCE versus partial multimarginal matching gap",
@@ -112,7 +124,11 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--weight-decay", type=float, default=1e-4)
     train.add_argument("--contrast-weight", type=float, default=0.1, help="gamma for CSR/NCL, matching the vision setup")
     train.add_argument("--temperature", type=float, default=0.2)
-    train.add_argument("--mmpot-weight", type=float, default=0.1)
+    train.add_argument(
+        "--mmpot-weights", type=parse_floats,
+        default=[0.8, 0.9, 1.0, 1.1, 1.2, 1.3],
+        help="MMPOT loss-weight grid; best mean validation 1-NN candidate is selected",
+    )
     train.add_argument("--ot-mass", type=float, default=0.8)
     train.add_argument("--ot-eta", type=float, default=0.2, help="M3G recommendation for circular variance")
     train.add_argument("--ot-iters", type=int, default=100)
@@ -159,6 +175,8 @@ def validate_args(a: argparse.Namespace) -> None:
         raise ValueError("faiss-gpu-device must be non-negative")
     if a.faiss_temp_memory_mib < 0:
         raise ValueError("faiss-temp-memory-mib must be non-negative")
+    if not a.mmpot_weights:
+        raise ValueError("mmpot-weights must contain at least one value")
 
 
 def choose_device(spec: str) -> torch.device:
@@ -568,11 +586,12 @@ def train_method(
     dataset: CachedFeatures,
     device: torch.device,
     args: argparse.Namespace,
+    run_name: Optional[str] = None,
 ) -> Tuple[TopKSAE, List[Dict[str, Any]]]:
     model = TopKSAE(512, args.hidden_dim, args.dead_steps).to(device)
     model.load_state_dict(initial_state)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, eps=6.25e-10)
-    method_dir = args.output_dir / method
+    method_dir = args.output_dir / (run_name or method)
     checkpoint = method_dir / "last.pt"
     history: List[Dict[str, Any]] = []
     start_epoch = 0
@@ -632,7 +651,7 @@ def train_method(
             sums["mass_error"] += mass_error * count
             if step % args.print_freq == 0:
                 print(
-                    f"{method} epoch={epoch+1} step={step}/{len(loader)} "
+                    f"{run_name or method} epoch={epoch+1} step={step}/{len(loader)} "
                     f"loss={float(objective):.5f} recon={float(recon_loss):.5f} repr={float(repr_loss):.5f}",
                     flush=True,
                 )
@@ -646,7 +665,7 @@ def train_method(
         )
         history.append({"epoch": epoch + 1, **asdict(result)})
         save_checkpoint(checkpoint, model, optimizer, epoch, history, args)
-        atomic_json({"method": method, "history": history}, method_dir / "history.json")
+        atomic_json({"method": method, "run": run_name or method, "history": history}, method_dir / "history.json")
     return model, history
 
 
@@ -769,6 +788,7 @@ def write_comparison(results: Mapping[str, Any], path: Path) -> None:
             "topk": int(k),
             "csr_1nn_top1": csr["top1"],
             "mmpot_1nn_top1": other["top1"],
+            "selected_mmpot_weight": results["mmpot"]["weight"],
             "delta_mmpot_minus_csr": other["top1"] - csr["top1"],
         })
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -776,6 +796,76 @@ def write_comparison(results: Mapping[str, Any], path: Path) -> None:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def mean_knn_top1(result: Mapping[str, Any]) -> float:
+    scores = [item["top1"] for item in result["knn"]["per_topk"].values()]
+    return float(np.mean(scores))
+
+
+def write_grid_search(grid: Mapping[str, Any], path: Path) -> None:
+    rows: List[Dict[str, Any]] = []
+    for candidate in sorted(grid.values(), key=lambda item: item["weight"]):
+        mean_top1 = mean_knn_top1(candidate)
+        for topk, metrics in candidate["knn"]["per_topk"].items():
+            rows.append({
+                "mmpot_weight": candidate["weight"],
+                "topk": int(topk),
+                "top1": metrics["top1"],
+                "mean_neighbor_l2_squared": metrics["mean_neighbor_l2_squared"],
+                "mean_top1_across_topk": mean_top1,
+                "selected": candidate.get("selected", False),
+            })
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def plot_grid_search(results: Mapping[str, Any], output_dir: Path) -> None:
+    grid = results.get("mmpot_grid")
+    if not grid:
+        return
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    candidates = sorted(grid.values(), key=lambda item: item["weight"])
+    weights = [item["weight"] for item in candidates]
+    means = [mean_knn_top1(item) for item in candidates]
+    selected_weight = results["mmpot"]["weight"]
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), constrained_layout=True)
+
+    axes[0].plot(weights, means, marker="o", linewidth=2, color="#2864dc")
+    best_index = weights.index(selected_weight)
+    axes[0].scatter([selected_weight], [means[best_index]], s=120, marker="*",
+                    color="#d43f3a", zorder=3, label=f"selected: {selected_weight:g}")
+    axes[0].set(title="MMPOT weight selection", xlabel="MMPOT loss weight",
+                ylabel="Mean validation 1-NN top-1 (%)")
+    axes[0].grid(alpha=0.25)
+    axes[0].legend(frameon=False)
+
+    for candidate in candidates:
+        per_topk = candidate["knn"]["per_topk"]
+        x = [int(k) for k in per_topk]
+        y = [per_topk[str(k)]["top1"] for k in x]
+        selected = candidate["weight"] == selected_weight
+        axes[1].plot(x, y, marker="o", linewidth=2.8 if selected else 1.2,
+                     alpha=1.0 if selected else 0.45,
+                     label=f"MMPOT w={candidate['weight']:g}" + (" (selected)" if selected else ""))
+    if "csr" in results:
+        csr = results["csr"]["knn"]["per_topk"]
+        x = [int(k) for k in csr]
+        axes[1].plot(x, [csr[str(k)]["top1"] for k in x], linestyle="--",
+                     color="black", linewidth=2, label="CSR")
+    axes[1].set(title="Validation accuracy across sparsity levels", xlabel="Top-K active features",
+                ylabel="1-NN top-1 (%)", xscale="log")
+    axes[1].grid(alpha=0.25)
+    axes[1].legend(frameon=False, fontsize=8, ncol=2)
+    for suffix in ("png", "pdf"):
+        fig.savefig(output_dir / f"mmpot_weight_grid.{suffix}", dpi=220, bbox_inches="tight")
+    plt.close(fig)
 
 
 def serializable_args(args: argparse.Namespace) -> Dict[str, Any]:
@@ -822,17 +912,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         torch.from_numpy(np.asarray(train_data.features[:sample_count], dtype=np.float32).mean(axis=0))
     )
     initial_state = {key: value.clone() for key, value in template.state_dict().items()}
-    methods = list(METHODS) if args.method == "both" else [args.method]
     results: Dict[str, Any] = {}
-    for method in methods:
+    if args.method in ("csr", "both"):
         seed_all(args.seed)
-        model, history = train_method(method, initial_state, train_data, device, args)
-        knn = benchmark_method(method, model, train_data, val_data, device, args)
-        results[method] = {"history": history, "knn": knn}
-        atomic_json(results[method], args.output_dir / method / "results.json")
+        model, history = train_method("csr", initial_state, train_data, device, args)
+        knn = benchmark_method("csr", model, train_data, val_data, device, args)
+        results["csr"] = {"history": history, "knn": knn}
+        atomic_json(results["csr"], args.output_dir / "csr" / "results.json")
         del model
         if device.type == "cuda":
             torch.cuda.empty_cache()
+
+    if args.method in ("mmpot", "both"):
+        grid: Dict[str, Any] = {}
+        for weight in args.mmpot_weights:
+            seed_all(args.seed)
+            candidate_args = argparse.Namespace(**vars(args))
+            candidate_args.mmpot_weight = weight
+            run_name = f"mmpot_weight_{weight:.1f}".replace(".", "p")
+            model, history = train_method(
+                "mmpot", initial_state, train_data, device, candidate_args, run_name=run_name
+            )
+            knn = benchmark_method(run_name, model, train_data, val_data, device, candidate_args)
+            candidate = {"weight": weight, "history": history, "knn": knn, "selected": False}
+            grid[f"{weight:g}"] = candidate
+            atomic_json(candidate, args.output_dir / run_name / "results.json")
+            del model
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        selected_key = max(grid, key=lambda key: (mean_knn_top1(grid[key]), -grid[key]["weight"]))
+        grid[selected_key]["selected"] = True
+        results["mmpot_grid"] = grid
+        results["mmpot"] = grid[selected_key]
+        write_grid_search(grid, args.output_dir / "mmpot_weight_grid.csv")
+        plot_grid_search(results, args.output_dir)
+        atomic_json(
+            {"selection_metric": "mean_top1_across_topk", "selected_weight": grid[selected_key]["weight"],
+             "candidates": {key: mean_knn_top1(value) for key, value in grid.items()}},
+            args.output_dir / "mmpot_weight_selection.json",
+        )
+        print(f"selected MMPOT weight={grid[selected_key]['weight']:g} "
+              f"mean_top1={mean_knn_top1(grid[selected_key]):.4f}", flush=True)
 
     summary = {
         "experiment": "CSR_InfoNCE_vs_CSR_Multimarginal_Partial_Matching_Gap",
