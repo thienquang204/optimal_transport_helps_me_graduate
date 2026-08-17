@@ -7,6 +7,8 @@ huggingface-hub==1.27.0
 Pillow==12.3.0
 tqdm==4.67.1
 
-# Exact nearest-neighbour evaluation in csr_vs_mmpot_imagenet.py. Keep this
-# unpinned so pip can select a wheel compatible with the host Python/NumPy.
-faiss-cpu
+# CUDA 12 FAISS for exact nearest-neighbour evaluation. GPU wheels are Linux
+# x86-64 only; other hosts retain the explicit --no-faiss-gpu development path.
+faiss-gpu-cu12; platform_system == "Linux" and platform_machine == "x86_64"
+faiss-cpu; platform_system != "Linux" or platform_machine != "x86_64"
+matplotlib

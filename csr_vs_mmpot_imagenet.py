@@ -39,7 +39,7 @@ Paper-scale data (resource intensive)
       --epochs 10 --batch-size 4096 --hidden-dim 2048 \
       --topk 8,16,32,64,128,256 --amp
 
-Dependencies: torch, torchvision, numpy, and faiss-cpu (or faiss-gpu).
+Dependencies: torch, torchvision, numpy, and a CUDA-enabled FAISS build.
 """
 
 from __future__ import annotations
@@ -129,7 +129,14 @@ def build_parser() -> argparse.ArgumentParser:
     knn.add_argument("--knn-batch-size", type=int, default=4096)
     knn.add_argument("--knn-query-batch", type=int, default=4096)
     knn.add_argument("--knn-normalize", action=argparse.BooleanOptionalAction, default=False)
-    knn.add_argument("--faiss-gpu", action="store_true", help="use GPU IndexFlatL2 if faiss-gpu is installed")
+    knn.add_argument(
+        "--faiss-gpu", action=argparse.BooleanOptionalAction, default=True,
+        help="use CUDA FAISS; pass --no-faiss-gpu for an explicit CPU fallback",
+    )
+    knn.add_argument("--faiss-gpu-device", type=int, default=None,
+                     help="CUDA device for FAISS (defaults to the model CUDA device, otherwise 0)")
+    knn.add_argument("--faiss-temp-memory-mib", type=int, default=512,
+                     help="temporary GPU memory reserved by FAISS; 0 disables its allocation stack")
     return p
 
 
@@ -148,6 +155,10 @@ def validate_args(a: argparse.Namespace) -> None:
         raise ValueError("epochs and batch sizes must be positive")
     if a.ot_microbatch < 2:
         raise ValueError("ot-microbatch must be at least 2")
+    if a.faiss_gpu_device is not None and a.faiss_gpu_device < 0:
+        raise ValueError("faiss-gpu-device must be non-negative")
+    if a.faiss_temp_memory_mib < 0:
+        raise ValueError("faiss-temp-memory-mib must be non-negative")
 
 
 def choose_device(spec: str) -> torch.device:
@@ -641,59 +652,70 @@ def train_method(
 
 @torch.inference_mode()
 def add_gallery_to_faiss(
-    index: Any, model: TopKSAE, dataset: CachedFeatures, k: int, batch_size: int, device: torch.device, normalize: bool
-) -> np.ndarray:
+    index: Any, model: TopKSAE, dataset: CachedFeatures, k: int, batch_size: int,
+    model_device: torch.device, index_device: torch.device, normalize: bool,
+) -> torch.Tensor:
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    labels: List[np.ndarray] = []
+    labels: List[torch.Tensor] = []
     model.eval()
     for features, target in loader:
-        z = model.encode(features.to(device), k).float()
+        z = model.encode(features.to(model_device), k).float()
         if normalize:
             z = F.normalize(z, dim=1)
-        index.add(np.ascontiguousarray(z.cpu().numpy(), dtype=np.float32))
-        labels.append(target.numpy())
-    return np.concatenate(labels)
+        index.add(z.to(index_device).contiguous())
+        labels.append(target)
+    return torch.cat(labels).to(index_device)
 
 
 @torch.inference_mode()
 def search_queries(
     index: Any,
-    gallery_labels: np.ndarray,
+    gallery_labels: torch.Tensor,
     model: TopKSAE,
     dataset: CachedFeatures,
     k: int,
     batch_size: int,
-    device: torch.device,
+    model_device: torch.device,
+    index_device: torch.device,
     normalize: bool,
 ) -> Tuple[float, float, int]:
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     correct, total, distance_sum = 0, 0, 0.0
     model.eval()
     for features, target in loader:
-        z = model.encode(features.to(device), k).float()
+        z = model.encode(features.to(model_device), k).float()
         if normalize:
             z = F.normalize(z, dim=1)
-        distances, indices = index.search(np.ascontiguousarray(z.cpu().numpy(), dtype=np.float32), 1)
+        distances, indices = index.search(z.to(index_device).contiguous(), 1)
         predictions = gallery_labels[indices[:, 0]]
-        truth = target.numpy()
-        correct += int((predictions == truth).sum())
-        total += len(truth)
-        distance_sum += float(distances[:, 0].sum())
+        truth = target.to(index_device, non_blocking=True)
+        correct += int((predictions == truth).sum().item())
+        total += truth.numel()
+        distance_sum += float(distances[:, 0].sum().item())
     return 100.0 * correct / total, distance_sum / total, total
 
 
-def make_faiss_index(dimension: int, use_gpu: bool) -> Any:
+def make_faiss_index(
+    dimension: int, use_gpu: bool, gpu_device: int, temp_memory_mib: int
+) -> Tuple[Any, Optional[Any]]:
     try:
         import faiss
+        import faiss.contrib.torch_utils  # noqa: F401 - registers PyTorch tensor interop
     except ImportError as exc:
-        raise RuntimeError("FAISS is required. Install with: pip install faiss-cpu") from exc
+        package = "faiss-gpu-cu12" if use_gpu else "faiss-cpu"
+        raise RuntimeError(f"FAISS is required. Install with: pip install {package}") from exc
     cpu_index = faiss.IndexFlatL2(dimension)
     if not use_gpu:
-        return cpu_index
+        return cpu_index, None
     if not hasattr(faiss, "StandardGpuResources"):
-        raise RuntimeError("--faiss-gpu requested, but the installed FAISS has no GPU support")
+        raise RuntimeError("GPU FAISS requested, but the installed package is CPU-only. "
+                           "Install faiss-gpu-cu12, or pass --no-faiss-gpu.")
+    if gpu_device >= torch.cuda.device_count():
+        raise RuntimeError(f"FAISS GPU {gpu_device} requested, but only "
+                           f"{torch.cuda.device_count()} CUDA device(s) are visible")
     resources = faiss.StandardGpuResources()
-    return faiss.index_cpu_to_gpu(resources, 0, cpu_index)
+    resources.setTempMemory(temp_memory_mib * 1024**2)
+    return faiss.index_cpu_to_gpu(resources, gpu_device, cpu_index), resources
 
 
 def benchmark_method(
@@ -705,14 +727,22 @@ def benchmark_method(
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
     results: Dict[str, Any] = {}
+    faiss_device = args.faiss_gpu_device
+    if faiss_device is None:
+        faiss_device = device.index if device.type == "cuda" and device.index is not None else 0
+    index_device = torch.device(f"cuda:{faiss_device}") if args.faiss_gpu else torch.device("cpu")
     for k in args.topk:
-        print(f"FAISS exact L2: method={method} k={k}", flush=True)
-        index = make_faiss_index(args.hidden_dim, args.faiss_gpu)
+        print(f"FAISS exact L2: method={method} k={k} device={index_device}", flush=True)
+        index, gpu_resources = make_faiss_index(
+            args.hidden_dim, args.faiss_gpu, faiss_device, args.faiss_temp_memory_mib
+        )
         gallery_labels = add_gallery_to_faiss(
-            index, model, train_data, k, args.knn_batch_size, device, args.knn_normalize
+            index, model, train_data, k, args.knn_batch_size,
+            device, index_device, args.knn_normalize
         )
         accuracy, mean_distance, queries = search_queries(
-            index, gallery_labels, model, val_data, k, args.knn_query_batch, device, args.knn_normalize
+            index, gallery_labels, model, val_data, k, args.knn_query_batch,
+            device, index_device, args.knn_normalize
         )
         results[str(k)] = {
             "top1": accuracy,
@@ -720,9 +750,10 @@ def benchmark_method(
             "gallery_samples": len(gallery_labels),
             "query_samples": queries,
         }
-        del index
+        del index, gpu_resources, gallery_labels
     return {
         "protocol": "FAISS_IndexFlatL2_train_gallery_validation_queries_1NN",
+        "device": str(index_device),
         "normalized": args.knn_normalize,
         "per_topk": results,
     }

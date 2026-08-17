@@ -15,8 +15,8 @@ ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 # EXPERIMENT SETTINGS — edit here, set environment variables, or append CLI
 # flags to this script. Appended flags take precedence for scalar arguments.
 # ---------------------------------------------------------------------------
-MAX_TRAIN="${MAX_TRAIN:-50000}"
-MAX_VAL="${MAX_VAL:-1000}"
+MAX_TRAIN="${MAX_TRAIN:-0}"
+MAX_VAL="${MAX_VAL:-0}"
 EPOCHS="${EPOCHS:-10}"
 BATCH_SIZE="${BATCH_SIZE:-1024}"
 FEATURE_BATCH_SIZE="${FEATURE_BATCH_SIZE:-512}"
@@ -38,6 +38,8 @@ OT_MICROBATCH="${OT_MICROBATCH:-32}"
 SEED="${SEED:-42}"
 AMP="${AMP:-1}"
 REBUILD_CACHE="${REBUILD_CACHE:-0}"
+FAISS_GPU_DEVICE="${FAISS_GPU_DEVICE:-0}"
+FAISS_TEMP_MEMORY_MIB="${FAISS_TEMP_MEMORY_MIB:-512}"
 
 die() {
     echo "Error: $*" >&2
@@ -58,7 +60,7 @@ fi
 
 mkdir -p "$OUTPUT_ROOT"
 
-echo "Building $IMAGE_NAME with the CSR/MMPOT dependencies (including faiss-cpu)..."
+echo "Building $IMAGE_NAME with the CSR/MMPOT dependencies (including CUDA FAISS)..."
 "${docker_cmd[@]}" build -t "$IMAGE_NAME" "$SCRIPT_DIR"
 
 python_args=(
@@ -83,6 +85,9 @@ python_args=(
     --ot-iters "$OT_ITERS"
     --ot-microbatch "$OT_MICROBATCH"
     --seed "$SEED"
+    --faiss-gpu
+    --faiss-gpu-device "$FAISS_GPU_DEVICE"
+    --faiss-temp-memory-mib "$FAISS_TEMP_MEMORY_MIB"
 )
 
 case "$AMP" in
@@ -120,6 +125,7 @@ docker_args+=(
     -e OUTPUT_DIR=/output/csr_mmpot/results
     -e WEIGHTS_CACHE=/output/csr_mmpot/weights
     -e INSTALL_DEPS=1
+    -e FAISS_GPU=1
 )
 
 echo "Running frozen ResNet-18 CSR vs MMPOT"
@@ -127,6 +133,7 @@ echo "  ImageNet volume: $DATA_VOLUME mounted at /data"
 echo "  dataset cache:   $DATA_ROOT"
 echo "  host results:    $OUTPUT_ROOT"
 echo "  train/val limit: $MAX_TRAIN / $MAX_VAL (0 means full split)"
+echo "  FAISS GPU:       $FAISS_GPU_DEVICE (${FAISS_TEMP_MEMORY_MIB} MiB temporary memory)"
 
 run_status=0
 "${docker_cmd[@]}" "${docker_args[@]}" \
