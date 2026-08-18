@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-"""One-file ImageNet experiment: CSR (InfoNCE) versus CSR (partial M3G).
+"""ImageNet experiment: Matryoshka ResNet-18 versus MP-SAE.
 
 Pipeline
 --------
 1. Download/cache torchvision's pretrained ResNet-18 weights locally.
 2. Freeze the backbone and cache deterministic ImageNet train/validation features.
-3. Train identically initialized tied Top-K sparse autoencoders:
-   - ``csr``: reconstruction + cross-sparsity non-negative InfoNCE.
-   - ``mmpot``: one model per requested MMPOT loss weight, using reconstruction
-     + multimarginal partial matching gap (M3PG).
-4. Encode the train split as the gallery and validation split as queries.
-5. Evaluate exact L2 1-NN with FAISS ``IndexFlatL2`` at every requested Top-K.
-6. Select the MMPOT weight by mean validation accuracy across Top-K settings.
-7. Save isolated checkpoints, histories, JSON/CSV results, and PNG/PDF plots.
+3. Fine-tune ResNet-18 end-to-end with Matryoshka Representation Learning
+   (MRL), using a classifier at every requested feature-prefix dimension and
+   at the full 512-dimensional representation.
+4. Train a tied Top-K sparse autoencoder on frozen ResNet-18 features with the
+   multimarginal partial matching gap (M3PG) weighted by the fixed value 1.3.
+5. Encode the train split as the gallery and validation split as queries.
+6. Evaluate exact L2 1-NN with FAISS ``IndexFlatL2`` at each representation
+   budget: MRL prefix dimension K versus K active MP-SAE latents.
+7. Save checkpoints, histories, JSON results, publication tables, and figures.
 
-The MMPOT arm treats Top-K, Top-2K, and Top-4K codes of the same frozen image
-embedding as three aligned views.  Its multiway cost is the circular-variance
-cost of Piran et al. (2024), and its reference partial polymatching is ``s J``.
-This is a research extension, not a claim that it appeared in either source
-paper.
+The proposed Multimarginal Presentation with Sparse Autoencoder (MP-SAE) arm
+treats Top-K, Top-2K, and Top-4K codes of the same frozen image embedding as
+three aligned views.  Its multiway cost is the circular-variance cost of Piran
+et al. (2024), and its reference partial polymatching is ``s J``.  This is a
+research extension, not a claim that it appeared in either source paper.
 
 Expected ImageNet layout
 ------------------------
@@ -31,13 +32,13 @@ Expected ImageNet layout
 Example lightweight development run
 -----------------------------------
     python csr_vs_mmpot_imagenet.py --data-root /path/to/imagenet \
-      --cache-dir runs/csr_mmpot/cache --output-dir runs/csr_mmpot \
+      --cache-dir runs/matryoshka_mpsae/cache --output-dir runs/matryoshka_mpsae \
       --max-train 50000 --max-val 10000 --epochs 3 --batch-size 256
 
 Paper-scale data (resource intensive)
 -------------------------------------
     python csr_vs_mmpot_imagenet.py --data-root /path/to/imagenet \
-      --cache-dir /fastssd/imagenet_rn18 --output-dir runs/csr_mmpot \
+      --cache-dir /fastssd/imagenet_rn18 --output-dir runs/matryoshka_mpsae \
       --epochs 10 --batch-size 4096 --hidden-dim 2048 \
       --topk 8,16,32,64,128,256 --amp
 
@@ -55,17 +56,27 @@ import random
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
-from torchvision import datasets, models
+from torchvision import datasets, models, transforms
 
 
-METHODS = ("csr", "mmpot")
+MATRYOSHKA = "matryoshka"
+MP_SAE = "mpsae"
+METHODS = (MATRYOSHKA, MP_SAE)
+METHOD_LABELS = {
+    MATRYOSHKA: "Matryoshka ResNet-18",
+    MP_SAE: "Multimarginal Presentation with Sparse Autoencoder (MP-SAE)",
+}
+MMPOT_LOSS_WEIGHT = 1.3
+IMAGENET_CLASSES = 1000
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 def parse_ints(value: str) -> List[int]:
@@ -78,19 +89,9 @@ def parse_ints(value: str) -> List[int]:
     return sorted(set(result))
 
 
-def parse_floats(value: str) -> List[float]:
-    try:
-        result = [float(x.strip()) for x in value.split(",") if x.strip()]
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("expected comma-separated numbers") from exc
-    if not result or any(not math.isfinite(x) or x <= 0 for x in result):
-        raise argparse.ArgumentTypeError("values must be finite and positive")
-    return sorted(set(result))
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Frozen RN18 + Top-K SAE: CSR InfoNCE versus partial multimarginal matching gap",
+        description="ImageNet: end-to-end Matryoshka ResNet-18 versus frozen RN18 + MP-SAE",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     data = p.add_argument_group("ImageNet and feature cache")
@@ -99,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument("--hf-dataset-id", default="ILSVRC/imagenet-1k")
     data.add_argument("--hf-revision", default="main")
     data.add_argument("--hf-token-env", default="HF_TOKEN")
-    data.add_argument("--cache-dir", type=Path, default=Path("runs/csr_mmpot/cache"))
+    data.add_argument("--cache-dir", type=Path, default=Path("runs/matryoshka_mpsae/cache"))
     data.add_argument("--weights-cache", type=Path, default=Path("weights"), help="local TORCH_HOME for RN18 weights")
     data.add_argument("--rebuild-cache", action="store_true")
     data.add_argument("--feature-batch-size", type=int, default=512)
@@ -117,18 +118,13 @@ def build_parser() -> argparse.ArgumentParser:
     model.add_argument("--multi-topk-weight", type=float, default=1.0 / 8.0)
 
     train = p.add_argument_group("training")
-    train.add_argument("--method", choices=("csr", "mmpot", "both"), default="both")
+    train.add_argument("--method", choices=(*METHODS, "both"), default="both")
     train.add_argument("--epochs", type=int, default=10)
     train.add_argument("--batch-size", type=int, default=1024)
     train.add_argument("--lr", type=float, default=4e-5)
     train.add_argument("--weight-decay", type=float, default=1e-4)
-    train.add_argument("--contrast-weight", type=float, default=0.1, help="gamma for CSR/NCL, matching the vision setup")
-    train.add_argument("--temperature", type=float, default=0.2)
-    train.add_argument(
-        "--mmpot-weights", type=parse_floats,
-        default=[0.8, 0.9, 1.0, 1.1, 1.2, 1.3],
-        help="MMPOT loss-weight grid; best mean validation 1-NN candidate is selected",
-    )
+    train.add_argument("--mrl-lr", type=float, default=1e-2, help="ResNet-18 MRL fine-tuning learning rate")
+    train.add_argument("--mrl-momentum", type=float, default=0.9)
     train.add_argument("--ot-mass", type=float, default=0.8)
     train.add_argument("--ot-eta", type=float, default=0.2, help="M3G recommendation for circular variance")
     train.add_argument("--ot-iters", type=int, default=100)
@@ -139,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--print-freq", type=int, default=50)
     train.add_argument("--resume", action="store_true")
-    train.add_argument("--output-dir", type=Path, default=Path("runs/csr_mmpot"))
+    train.add_argument("--output-dir", type=Path, default=Path("runs/matryoshka_mpsae"))
 
     knn = p.add_argument_group("exact FAISS 1-NN")
     knn.add_argument("--knn-batch-size", type=int, default=4096)
@@ -163,7 +159,9 @@ def validate_args(a: argparse.Namespace) -> None:
                 raise FileNotFoundError(f"missing ImageNet directory: {a.data_root / split}")
     elif not a.data_root.is_dir():
         raise FileNotFoundError(f"missing Hugging Face cache directory: {a.data_root}")
-    if a.hidden_dim < max(max(a.topk), 4 * a.train_k):
+    if a.method in (MATRYOSHKA, "both") and max(a.topk) > 512:
+        raise ValueError("Matryoshka prefix dimensions cannot exceed the ResNet-18 feature dimension (512)")
+    if a.method in (MP_SAE, "both") and a.hidden_dim < max(max(a.topk), 4 * a.train_k):
         raise ValueError("hidden-dim must be >= max(topk) and >= 4*train-k")
     if not 0.0 < a.ot_mass <= 1.0:
         raise ValueError("ot-mass must be in (0,1]")
@@ -175,8 +173,8 @@ def validate_args(a: argparse.Namespace) -> None:
         raise ValueError("faiss-gpu-device must be non-negative")
     if a.faiss_temp_memory_mib < 0:
         raise ValueError("faiss-temp-memory-mib must be non-negative")
-    if not a.mmpot_weights:
-        raise ValueError("mmpot-weights must contain at least one value")
+    if a.mrl_lr <= 0 or not 0 <= a.mrl_momentum < 1:
+        raise ValueError("mrl-lr must be positive and mrl-momentum must be in [0,1)")
 
 
 def choose_device(spec: str) -> torch.device:
@@ -220,6 +218,46 @@ class FrozenResNet18(nn.Module):
         return self.network(images)
 
 
+class MatryoshkaResNet18(nn.Module):
+    """ResNet-18 trained end-to-end with classifiers on nested prefixes."""
+
+    def __init__(self, weights_cache: Path, nested_dims: Sequence[int]) -> None:
+        super().__init__()
+        os.environ["TORCH_HOME"] = str(weights_cache.expanduser().resolve())
+        network = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        network.fc = nn.Identity()
+        self.network = network
+        self.output_dim = 512
+        self.nested_dims = tuple(sorted(set((*nested_dims, self.output_dim))))
+        if self.nested_dims[0] <= 0 or self.nested_dims[-1] > self.output_dim:
+            raise ValueError("Matryoshka dimensions must be in [1, 512]")
+        self.heads = nn.ModuleDict({
+            str(dimension): nn.Linear(dimension, IMAGENET_CLASSES)
+            for dimension in self.nested_dims
+        })
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        return self.network(images)
+
+    def classification_loss(self, features: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        losses = [
+            F.cross_entropy(self.heads[str(dimension)](features[:, :dimension]), target)
+            for dimension in self.nested_dims
+        ]
+        return torch.stack(losses).mean()
+
+
+def matryoshka_transforms() -> Tuple[Any, Any]:
+    train_transform = transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    ])
+    evaluation_transform = models.ResNet18_Weights.IMAGENET1K_V1.transforms()
+    return train_transform, evaluation_transform
+
+
 class HuggingFaceImages(Dataset):
     """Apply torchvision preprocessing to a cached Hugging Face split."""
 
@@ -244,6 +282,34 @@ def deterministic_subset(dataset: Dataset, maximum: int, seed: int) -> Dataset:
     generator = torch.Generator().manual_seed(seed)
     indices = torch.randperm(len(dataset), generator=generator)[:maximum].tolist()
     return Subset(dataset, indices)
+
+
+def build_image_dataset(
+    split: str,
+    root: Path,
+    transform: Any,
+    data_backend: str,
+    hf_dataset_id: str,
+    hf_revision: str,
+    hf_token_env: str,
+) -> Tuple[Dataset, str]:
+    """Build an ImageNet split without coupling it to either experiment arm."""
+    if data_backend == "imagefolder":
+        return datasets.ImageFolder(root / split, transform=transform), split
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise RuntimeError("Hugging Face backend requires: pip install datasets") from exc
+    source_split = "validation" if split == "val" else "train"
+    token_value = os.environ.get(hf_token_env)
+    hf_split = load_dataset(
+        path=hf_dataset_id,
+        split=source_split,
+        cache_dir=str(root),
+        revision=hf_revision,
+        token=token_value if token_value else True,
+    )
+    return HuggingFaceImages(hf_split, transform), source_split
 
 
 def cache_paths(cache_dir: Path, split: str) -> Tuple[Path, Path, Path]:
@@ -276,24 +342,9 @@ def cache_split(
         with meta_path.open("r", encoding="utf-8") as f:
             return json.load(f)
 
-    if data_backend == "imagefolder":
-        dataset: Dataset = datasets.ImageFolder(root / split, transform=backbone.transform)
-        source_split = split
-    else:
-        try:
-            from datasets import load_dataset
-        except ImportError as exc:
-            raise RuntimeError("Hugging Face backend requires: pip install datasets") from exc
-        source_split = "validation" if split == "val" else "train"
-        token_value = os.environ.get(hf_token_env)
-        hf_split = load_dataset(
-            path=hf_dataset_id,
-            split=source_split,
-            cache_dir=str(root),
-            revision=hf_revision,
-            token=token_value if token_value else True,
-        )
-        dataset = HuggingFaceImages(hf_split, backbone.transform)
+    dataset, source_split = build_image_dataset(
+        split, root, backbone.transform, data_backend, hf_dataset_id, hf_revision, hf_token_env
+    )
     dataset = deterministic_subset(dataset, maximum, seed + (0 if split == "train" else 1))
     loader = DataLoader(
         dataset,
@@ -396,9 +447,10 @@ class TopKSAE(nn.Module):
         z2 = self.keep_topk(pre, min(2 * k, self.decoder.shape[0]))
         z4 = self.keep_topk(pre, min(4 * k, self.decoder.shape[0]))
         recon1 = self.decode(z1)
+        recon2 = self.decode(z2)
         recon4 = self.decode(z4)
         main = F.mse_loss(recon1, x)
-        multi = F.mse_loss(recon4, x)
+        nested = 0.5 * (F.mse_loss(recon2, x) + F.mse_loss(recon4, x))
 
         dead = self.inactive_steps >= self.dead_steps
         if dead.any() and k_aux > 0:
@@ -409,23 +461,19 @@ class TopKSAE(nn.Module):
             aux = F.mse_loss(aux_z @ self.decoder, residual)
         else:
             aux = main.new_zeros(())
-        total = main + multi_weight * multi + aux_weight * aux
+        total = main + multi_weight * nested + aux_weight * aux
         self.update_activity(z1)
-        stats = {"recon": main, "multi_recon": multi, "aux": aux, "dead_fraction": dead.float().mean()}
+        stats = {
+            "recon": main,
+            "nested_recon": nested,
+            "aux": aux,
+            "dead_fraction": dead.float().mean(),
+        }
         return total, stats, (z1, z2, z4)
 
     @torch.no_grad()
     def normalize_decoder(self) -> None:
         self.decoder.copy_(F.normalize(self.decoder, dim=1))
-
-
-def cross_view_infonce(z_a: torch.Tensor, z_b: torch.Tensor, temperature: float) -> torch.Tensor:
-    """Symmetric InfoNCE; the same image at two sparsity levels is positive."""
-    a = F.normalize(z_a, dim=1, eps=1e-8)
-    b = F.normalize(z_b, dim=1, eps=1e-8)
-    logits = a @ b.T / temperature
-    labels = torch.arange(a.shape[0], device=a.device)
-    return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels))
 
 
 def circular_variance_cost(z1: torch.Tensor, z2: torch.Tensor, z3: torch.Tensor) -> torch.Tensor:
@@ -562,36 +610,182 @@ def partial_matching_gap(
 class EpochResult:
     total: float
     reconstruction: float
-    representation: float
+    mmpot_regularizer: float
     dead_fraction: float
     ot_mass_error: float
     seconds: float
 
 
 def save_checkpoint(
-    path: Path, model: TopKSAE, optimizer: torch.optim.Optimizer, epoch: int, history: List[Dict[str, Any]], args: argparse.Namespace
+    path: Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    history: List[Dict[str, Any]],
+    args: argparse.Namespace,
+    extra: Optional[Mapping[str, Any]] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    torch.save(
-        {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "history": history, "args": vars(args)},
-        tmp,
-    )
+    payload: Dict[str, Any] = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+        "history": history,
+        "args": vars(args),
+    }
+    if extra:
+        payload.update(extra)
+    torch.save(payload, tmp)
     os.replace(tmp, path)
 
 
-def train_method(
-    method: str,
+def train_matryoshka_backbone(
+    device: torch.device, args: argparse.Namespace
+) -> Tuple[MatryoshkaResNet18, List[Dict[str, Any]]]:
+    """Fine-tune ResNet-18 directly with the standard nested-prefix MRL loss."""
+    model = MatryoshkaResNet18(args.weights_cache, args.topk).to(device)
+    optimizer = torch.optim.SGD(
+        model.parameters(), lr=args.mrl_lr, momentum=args.mrl_momentum,
+        weight_decay=args.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    method_dir = args.output_dir / MATRYOSHKA
+    checkpoint = method_dir / "last.pt"
+    history: List[Dict[str, Any]] = []
+    start_epoch = 0
+    if args.resume and checkpoint.is_file():
+        state = torch.load(checkpoint, map_location=device, weights_only=False)
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        if "scheduler" in state:
+            scheduler.load_state_dict(state["scheduler"])
+        history = state.get("history", [])
+        start_epoch = int(state["epoch"]) + 1
+
+    train_transform, _ = matryoshka_transforms()
+    dataset, _ = build_image_dataset(
+        "train", args.data_root, train_transform, args.data_backend,
+        args.hf_dataset_id, args.hf_revision, args.hf_token_env,
+    )
+    dataset = deterministic_subset(dataset, args.max_train, args.seed)
+    generator = torch.Generator().manual_seed(args.seed)
+    loader = DataLoader(
+        dataset, batch_size=args.batch_size, shuffle=True, generator=generator,
+        num_workers=args.workers, pin_memory=device.type == "cuda",
+        persistent_workers=args.workers > 0, drop_last=False,
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    for epoch in range(start_epoch, args.epochs):
+        model.train()
+        loss_sum, samples, started = 0.0, 0, time.time()
+        for step, (images, target) in enumerate(loader):
+            images = images.to(device, non_blocking=True)
+            target = target.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type=device.type, enabled=args.amp and device.type == "cuda"):
+                features = model(images)
+                objective = model.classification_loss(features, target)
+            scaler.scale(objective).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            count = images.shape[0]
+            samples += count
+            loss_sum += float(objective.detach()) * count
+            if step % args.print_freq == 0:
+                print(
+                    f"{MATRYOSHKA} epoch={epoch + 1} step={step}/{len(loader)} "
+                    f"mrl_ce={float(objective):.5f}", flush=True,
+                )
+        scheduler.step()
+        record = {
+            "epoch": epoch + 1,
+            "total": loss_sum / samples,
+            "classification": loss_sum / samples,
+            "learning_rate": optimizer.param_groups[0]["lr"],
+            "seconds": time.time() - started,
+        }
+        history.append(record)
+        save_checkpoint(
+            checkpoint, model, optimizer, epoch, history, args,
+            extra={"scheduler": scheduler.state_dict(), "nested_dims": model.nested_dims},
+        )
+        atomic_json(
+            {"method": MATRYOSHKA, "nested_dims": model.nested_dims, "history": history},
+            method_dir / "history.json",
+        )
+    return model, history
+
+
+@torch.inference_mode()
+def cache_matryoshka_split(
+    split: str,
+    model: MatryoshkaResNet18,
+    device: torch.device,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    """Cache deterministic features from the fine-tuned MRL backbone once."""
+    cache_dir = args.output_dir / MATRYOSHKA / "feature_cache"
+    feature_path, label_path, meta_path = cache_paths(cache_dir, split)
+    _, evaluation_transform = matryoshka_transforms()
+    dataset, source_split = build_image_dataset(
+        split, args.data_root, evaluation_transform, args.data_backend,
+        args.hf_dataset_id, args.hf_revision, args.hf_token_env,
+    )
+    maximum = args.max_train if split == "train" else args.max_val
+    subset_seed = args.seed + (0 if split == "train" else 1)
+    dataset = deterministic_subset(dataset, maximum, subset_seed)
+    loader = DataLoader(
+        dataset, batch_size=args.feature_batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=device.type == "cuda",
+        persistent_workers=args.workers > 0,
+    )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    features = np.lib.format.open_memmap(
+        feature_path, mode="w+", dtype=np.float16, shape=(len(dataset), model.output_dim)
+    )
+    labels = np.lib.format.open_memmap(
+        label_path, mode="w+", dtype=np.int64, shape=(len(dataset),)
+    )
+    model.eval()
+    offset, started = 0, time.time()
+    for images, target in loader:
+        images = images.to(device, non_blocking=True)
+        with torch.autocast(device_type=device.type, enabled=args.amp and device.type == "cuda"):
+            batch_features = model(images).float()
+        count = images.shape[0]
+        features[offset : offset + count] = batch_features.cpu().numpy().astype(np.float16)
+        labels[offset : offset + count] = target.numpy()
+        offset += count
+        if offset % (args.feature_batch_size * 100) < count:
+            print(f"cache {MATRYOSHKA} {split}: {offset}/{len(dataset)}", flush=True)
+    features.flush()
+    labels.flush()
+    metadata = {
+        "split": split,
+        "samples": len(dataset),
+        "feature_dim": model.output_dim,
+        "dtype": "float16",
+        "backbone": "fine_tuned_matryoshka_resnet18",
+        "nested_dims": model.nested_dims,
+        "data_backend": args.data_backend,
+        "source_split": source_split,
+        "seconds": time.time() - started,
+    }
+    atomic_json(metadata, meta_path)
+    return metadata
+
+
+def train_mp_sae(
     initial_state: Mapping[str, torch.Tensor],
     dataset: CachedFeatures,
     device: torch.device,
     args: argparse.Namespace,
-    run_name: Optional[str] = None,
 ) -> Tuple[TopKSAE, List[Dict[str, Any]]]:
     model = TopKSAE(512, args.hidden_dim, args.dead_steps).to(device)
     model.load_state_dict(initial_state)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, eps=6.25e-10)
-    method_dir = args.output_dir / (run_name or method)
+    method_dir = args.output_dir / MP_SAE
     checkpoint = method_dir / "last.pt"
     history: List[Dict[str, Any]] = []
     start_epoch = 0
@@ -625,19 +819,14 @@ def train_method(
                 recon_loss, recon_stats, views = model.reconstruction_losses(
                     features, args.train_k, args.k_aux, args.multi_topk_weight, args.aux_weight
                 )
-                if method == "csr":
-                    repr_loss = cross_view_infonce(views[0], views[2], args.temperature)
-                    objective = recon_loss + args.contrast_weight * repr_loss
-                    mass_error = 0.0
-                else:
-                    # Force the numerically sensitive OT path to float32.
-                    with torch.autocast(device_type=device.type, enabled=False):
-                        repr_loss, ot_diag = partial_matching_gap(
-                            views[0].float(), views[1].float(), views[2].float(),
-                            args.ot_mass, args.ot_eta, args.ot_iters, args.ot_tol, args.ot_microbatch,
-                        )
-                    objective = recon_loss + args.mmpot_weight * repr_loss
-                    mass_error = ot_diag["mass_error"]
+                # Force the numerically sensitive OT path to float32.
+                with torch.autocast(device_type=device.type, enabled=False):
+                    repr_loss, ot_diag = partial_matching_gap(
+                        views[0].float(), views[1].float(), views[2].float(),
+                        args.ot_mass, args.ot_eta, args.ot_iters, args.ot_tol, args.ot_microbatch,
+                    )
+                objective = recon_loss + MMPOT_LOSS_WEIGHT * repr_loss
+                mass_error = ot_diag["mass_error"]
             scaler.scale(objective).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -651,34 +840,55 @@ def train_method(
             sums["mass_error"] += mass_error * count
             if step % args.print_freq == 0:
                 print(
-                    f"{run_name or method} epoch={epoch+1} step={step}/{len(loader)} "
+                    f"{MP_SAE} epoch={epoch+1} step={step}/{len(loader)} "
                     f"loss={float(objective):.5f} recon={float(recon_loss):.5f} repr={float(repr_loss):.5f}",
                     flush=True,
                 )
         result = EpochResult(
             total=sums["total"] / samples,
             reconstruction=sums["recon"] / samples,
-            representation=sums["repr"] / samples,
+            mmpot_regularizer=sums["repr"] / samples,
             dead_fraction=sums["dead"] / samples,
             ot_mass_error=sums["mass_error"] / samples,
             seconds=time.time() - started,
         )
         history.append({"epoch": epoch + 1, **asdict(result)})
         save_checkpoint(checkpoint, model, optimizer, epoch, history, args)
-        atomic_json({"method": method, "run": run_name or method, "history": history}, method_dir / "history.json")
+        atomic_json(
+            {"method": MP_SAE, "mmpot_loss_weight": MMPOT_LOSS_WEIGHT, "history": history},
+            method_dir / "history.json",
+        )
     return model, history
 
 
 @torch.inference_mode()
+def encode_for_benchmark(
+    method: str,
+    model: Optional[TopKSAE],
+    features: torch.Tensor,
+    k: int,
+    device: torch.device,
+) -> torch.Tensor:
+    features = features.to(device, non_blocking=True)
+    if method == MATRYOSHKA:
+        return features[:, :k].float()
+    if model is None:
+        raise ValueError("MP-SAE benchmarking requires a trained sparse autoencoder")
+    return model.encode(features, k).float()
+
+
+@torch.inference_mode()
 def add_gallery_to_faiss(
-    index: Any, model: TopKSAE, dataset: CachedFeatures, k: int, batch_size: int,
-    model_device: torch.device, index_device: torch.device, normalize: bool,
+    index: Any, method: str, model: Optional[TopKSAE], dataset: CachedFeatures,
+    k: int, batch_size: int, model_device: torch.device,
+    index_device: torch.device, normalize: bool,
 ) -> torch.Tensor:
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     labels: List[torch.Tensor] = []
-    model.eval()
+    if model is not None:
+        model.eval()
     for features, target in loader:
-        z = model.encode(features.to(model_device), k).float()
+        z = encode_for_benchmark(method, model, features, k, model_device)
         if normalize:
             z = F.normalize(z, dim=1)
         index.add(z.to(index_device).contiguous())
@@ -690,7 +900,8 @@ def add_gallery_to_faiss(
 def search_queries(
     index: Any,
     gallery_labels: torch.Tensor,
-    model: TopKSAE,
+    method: str,
+    model: Optional[TopKSAE],
     dataset: CachedFeatures,
     k: int,
     batch_size: int,
@@ -700,9 +911,10 @@ def search_queries(
 ) -> Tuple[float, float, int]:
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     correct, total, distance_sum = 0, 0, 0.0
-    model.eval()
+    if model is not None:
+        model.eval()
     for features, target in loader:
-        z = model.encode(features.to(model_device), k).float()
+        z = encode_for_benchmark(method, model, features, k, model_device)
         if normalize:
             z = F.normalize(z, dim=1)
         distances, indices = index.search(z.to(index_device).contiguous(), 1)
@@ -739,7 +951,7 @@ def make_faiss_index(
 
 def benchmark_method(
     method: str,
-    model: TopKSAE,
+    model: Optional[TopKSAE],
     train_data: CachedFeatures,
     val_data: CachedFeatures,
     device: torch.device,
@@ -752,15 +964,16 @@ def benchmark_method(
     index_device = torch.device(f"cuda:{faiss_device}") if args.faiss_gpu else torch.device("cpu")
     for k in args.topk:
         print(f"FAISS exact L2: method={method} k={k} device={index_device}", flush=True)
+        representation_dim = k if method == MATRYOSHKA else args.hidden_dim
         index, gpu_resources = make_faiss_index(
-            args.hidden_dim, args.faiss_gpu, faiss_device, args.faiss_temp_memory_mib
+            representation_dim, args.faiss_gpu, faiss_device, args.faiss_temp_memory_mib
         )
         gallery_labels = add_gallery_to_faiss(
-            index, model, train_data, k, args.knn_batch_size,
+            index, method, model, train_data, k, args.knn_batch_size,
             device, index_device, args.knn_normalize
         )
         accuracy, mean_distance, queries = search_queries(
-            index, gallery_labels, model, val_data, k, args.knn_query_batch,
+            index, gallery_labels, method, model, val_data, k, args.knn_query_batch,
             device, index_device, args.knn_normalize
         )
         results[str(k)] = {
@@ -774,48 +987,37 @@ def benchmark_method(
         "protocol": "FAISS_IndexFlatL2_train_gallery_validation_queries_1NN",
         "device": str(index_device),
         "normalized": args.knn_normalize,
+        "representation": "prefix_dimension" if method == MATRYOSHKA else "topk_sparse_latents",
         "per_topk": results,
     }
 
 
-def write_comparison(results: Mapping[str, Any], path: Path) -> None:
+def comparison_rows(results: Mapping[str, Any]) -> List[Dict[str, Any]]:
     if not all(method in results for method in METHODS):
-        return
-    rows = []
-    for k, csr in results["csr"]["knn"]["per_topk"].items():
-        other = results["mmpot"]["knn"]["per_topk"][k]
-        rows.append({
-            "topk": int(k),
-            "csr_1nn_top1": csr["top1"],
-            "mmpot_1nn_top1": other["top1"],
-            "selected_mmpot_weight": results["mmpot"]["weight"],
-            "delta_mmpot_minus_csr": other["top1"] - csr["top1"],
-        })
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def mean_knn_top1(result: Mapping[str, Any]) -> float:
-    scores = [item["top1"] for item in result["knn"]["per_topk"].values()]
-    return float(np.mean(scores))
-
-
-def write_grid_search(grid: Mapping[str, Any], path: Path) -> None:
+        return []
+    baseline = results[MATRYOSHKA]["knn"]["per_topk"]
+    proposed = results[MP_SAE]["knn"]["per_topk"]
     rows: List[Dict[str, Any]] = []
-    for candidate in sorted(grid.values(), key=lambda item: item["weight"]):
-        mean_top1 = mean_knn_top1(candidate)
-        for topk, metrics in candidate["knn"]["per_topk"].items():
-            rows.append({
-                "mmpot_weight": candidate["weight"],
-                "topk": int(topk),
-                "top1": metrics["top1"],
-                "mean_neighbor_l2_squared": metrics["mean_neighbor_l2_squared"],
-                "mean_top1_across_topk": mean_top1,
-                "selected": candidate.get("selected", False),
-            })
+    for k in sorted(int(value) for value in baseline):
+        mrl_metrics = baseline[str(k)]
+        mp_sae_metrics = proposed[str(k)]
+        rows.append({
+            "representation_budget": k,
+            "matryoshka_prefix_dim": k,
+            "mp_sae_active_latents": k,
+            "matryoshka_1nn_top1": mrl_metrics["top1"],
+            "mp_sae_1nn_top1": mp_sae_metrics["top1"],
+            "delta_mp_sae_minus_matryoshka": mp_sae_metrics["top1"] - mrl_metrics["top1"],
+            "matryoshka_mean_neighbor_l2_squared": mrl_metrics["mean_neighbor_l2_squared"],
+            "mp_sae_mean_neighbor_l2_squared": mp_sae_metrics["mean_neighbor_l2_squared"],
+            "mmpot_loss_weight": MMPOT_LOSS_WEIGHT,
+        })
+    return rows
+
+
+def write_comparison_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
+    if not rows:
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]))
@@ -823,48 +1025,176 @@ def write_grid_search(grid: Mapping[str, Any], path: Path) -> None:
         writer.writerows(rows)
 
 
-def plot_grid_search(results: Mapping[str, Any], output_dir: Path) -> None:
-    grid = results.get("mmpot_grid")
-    if not grid:
+def write_markdown_table(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
+    if not rows:
         return
+    lines = [
+        "| Budget K | Matryoshka ResNet-18 | MP-SAE | Delta |",
+        "|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['representation_budget']} | {row['matryoshka_1nn_top1']:.2f} | "
+            f"{row['mp_sae_1nn_top1']:.2f} | {row['delta_mp_sae_minus_matryoshka']:+.2f} |"
+        )
+    mrl_mean = float(np.mean([row["matryoshka_1nn_top1"] for row in rows]))
+    mp_sae_mean = float(np.mean([row["mp_sae_1nn_top1"] for row in rows]))
+    lines.append(f"| **Mean** | **{mrl_mean:.2f}** | **{mp_sae_mean:.2f}** | **{mp_sae_mean - mrl_mean:+.2f}** |")
+    lines.extend([
+        "",
+        "Values are ImageNet validation exact L2 1-NN top-1 accuracy (%). ",
+        "K denotes prefix dimension for Matryoshka and active latents for MP-SAE; the MMPOT loss weight is fixed at 1.3.",
+    ])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_latex_table(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
+    if not rows:
+        return
+    command, row_end = chr(92), chr(92) * 2
+
+    def emphasized(value: float, other: float) -> str:
+        formatted = f"{value:.2f}"
+        return f"{command}textbf{{{formatted}}}" if value >= other else formatted
+
+    lines = [
+        f"{command}begin{{table}}[t]",
+        f"{command}centering",
+        f"{command}caption{{ImageNet validation exact L2 1-NN top-1 accuracy ({command}%). "
+        "The budget K is the ResNet-18 prefix dimension for Matryoshka and the number "
+        "of active sparse latents for MP-SAE. The MMPOT loss weight is fixed at 1.3.}",
+        f"{command}label{{tab:matryoshka-mp-sae}}",
+        f"{command}small",
+        f"{command}begin{{tabular}}{{rrrr}}",
+        f"{command}toprule",
+        f"Budget K & Matryoshka & MP-SAE & Delta (pp) {row_end}",
+        f"{command}midrule",
+    ]
+    for row in rows:
+        mrl = float(row["matryoshka_1nn_top1"])
+        mp_sae = float(row["mp_sae_1nn_top1"])
+        lines.append(
+            f"{row['representation_budget']} & {emphasized(mrl, mp_sae)} & "
+            f"{emphasized(mp_sae, mrl)} & {mp_sae - mrl:+.2f} {row_end}"
+        )
+    mrl_mean = float(np.mean([row["matryoshka_1nn_top1"] for row in rows]))
+    mp_sae_mean = float(np.mean([row["mp_sae_1nn_top1"] for row in rows]))
+    lines.extend([
+        f"{command}midrule",
+        f"Mean & {emphasized(mrl_mean, mp_sae_mean)} & {emphasized(mp_sae_mean, mrl_mean)} & "
+        f"{mp_sae_mean - mrl_mean:+.2f} {row_end}",
+        f"{command}bottomrule",
+        f"{command}end{{tabular}}",
+        f"{command}end{{table}}",
+    ])
+    path.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+
+
+def configure_publication_style() -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["DejaVu Serif"],
+        "font.size": 8.0,
+        "axes.labelsize": 8.0,
+        "axes.titlesize": 8.5,
+        "legend.fontsize": 7.2,
+        "xtick.labelsize": 7.5,
+        "ytick.labelsize": 7.5,
+        "axes.linewidth": 0.7,
+        "lines.linewidth": 1.6,
+        "lines.markersize": 4.5,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "savefig.facecolor": "white",
+    })
 
-    candidates = sorted(grid.values(), key=lambda item: item["weight"])
-    weights = [item["weight"] for item in candidates]
-    means = [mean_knn_top1(item) for item in candidates]
-    selected_weight = results["mmpot"]["weight"]
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), constrained_layout=True)
 
-    axes[0].plot(weights, means, marker="o", linewidth=2, color="#2864dc")
-    best_index = weights.index(selected_weight)
-    axes[0].scatter([selected_weight], [means[best_index]], s=120, marker="*",
-                    color="#d43f3a", zorder=3, label=f"selected: {selected_weight:g}")
-    axes[0].set(title="MMPOT weight selection", xlabel="MMPOT loss weight",
-                ylabel="Mean validation 1-NN top-1 (%)")
-    axes[0].grid(alpha=0.25)
-    axes[0].legend(frameon=False)
+def plot_publication_comparison(results: Mapping[str, Any], output_dir: Path) -> None:
+    rows = comparison_rows(results)
+    if not rows:
+        return
+    configure_publication_style()
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FixedLocator, ScalarFormatter
 
-    for candidate in candidates:
-        per_topk = candidate["knn"]["per_topk"]
-        x = [int(k) for k in per_topk]
-        y = [per_topk[str(k)]["top1"] for k in x]
-        selected = candidate["weight"] == selected_weight
-        axes[1].plot(x, y, marker="o", linewidth=2.8 if selected else 1.2,
-                     alpha=1.0 if selected else 0.45,
-                     label=f"MMPOT w={candidate['weight']:g}" + (" (selected)" if selected else ""))
-    if "csr" in results:
-        csr = results["csr"]["knn"]["per_topk"]
-        x = [int(k) for k in csr]
-        axes[1].plot(x, [csr[str(k)]["top1"] for k in x], linestyle="--",
-                     color="black", linewidth=2, label="CSR")
-    axes[1].set(title="Validation accuracy across sparsity levels", xlabel="Top-K active features",
-                ylabel="1-NN top-1 (%)", xscale="log")
-    axes[1].grid(alpha=0.25)
-    axes[1].legend(frameon=False, fontsize=8, ncol=2)
-    for suffix in ("png", "pdf"):
-        fig.savefig(output_dir / f"mmpot_weight_grid.{suffix}", dpi=220, bbox_inches="tight")
+    budgets = [row["representation_budget"] for row in rows]
+    mrl = [row["matryoshka_1nn_top1"] for row in rows]
+    mp_sae = [row["mp_sae_1nn_top1"] for row in rows]
+    delta = [row["delta_mp_sae_minus_matryoshka"] for row in rows]
+    blue, orange = "#0072B2", "#D55E00"
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.75), constrained_layout=True)
+
+    axes[0].plot(budgets, mrl, color=blue, marker="o", label="Matryoshka ResNet-18")
+    axes[0].plot(budgets, mp_sae, color=orange, marker="s", label="MP-SAE (weight=1.3)")
+    axes[0].set_title("(a) Exact 1-NN accuracy", loc="left", fontweight="bold")
+    axes[0].set_ylabel("ImageNet val. top-1 accuracy (%)")
+    axes[0].legend(frameon=False, handlelength=2.2)
+
+    delta_colors = [orange if value >= 0 else blue for value in delta]
+    axes[1].bar(budgets, delta, width=[0.38 * value for value in budgets], color=delta_colors, alpha=0.9)
+    axes[1].axhline(0.0, color="#333333", linewidth=0.8)
+    axes[1].set_title("(b) Improvement of MP-SAE", loc="left", fontweight="bold")
+    axes[1].set_ylabel("Delta top-1 accuracy (pp)")
+
+    for axis in axes:
+        axis.set_xlabel("Representation budget K")
+        axis.set_xscale("log", base=2)
+        axis.xaxis.set_major_locator(FixedLocator(budgets))
+        axis.xaxis.set_major_formatter(ScalarFormatter())
+        axis.grid(axis="y", color="#B8B8B8", linestyle=(0, (2, 2)), linewidth=0.55, alpha=0.65)
+        axis.set_axisbelow(True)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_dir / "matryoshka_vs_mp_sae.pdf", bbox_inches="tight")
+    fig.savefig(output_dir / "matryoshka_vs_mp_sae.png", dpi=600, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_training_diagnostics(results: Mapping[str, Any], output_dir: Path) -> None:
+    if not all(method in results and results[method].get("history") for method in METHODS):
+        return
+    configure_publication_style()
+    import matplotlib.pyplot as plt
+
+    mrl_history = results[MATRYOSHKA]["history"]
+    mp_sae_history = results[MP_SAE]["history"]
+    blue, orange, green = "#0072B2", "#D55E00", "#009E73"
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.75), constrained_layout=True)
+
+    axes[0].plot(
+        [row["epoch"] for row in mrl_history],
+        [row["classification"] for row in mrl_history],
+        color=blue, marker="o",
+    )
+    axes[0].set_title("(a) Matryoshka ResNet-18", loc="left", fontweight="bold")
+    axes[0].set_ylabel("Mean nested cross-entropy")
+
+    epochs = [row["epoch"] for row in mp_sae_history]
+    axes[1].plot(epochs, [row["total"] for row in mp_sae_history], color=orange, marker="s", label="Total")
+    axes[1].plot(
+        epochs, [row["reconstruction"] for row in mp_sae_history],
+        color=green, marker="o", linestyle="--", label="Reconstruction",
+    )
+    axes[1].plot(
+        epochs, [MMPOT_LOSS_WEIGHT * row["mmpot_regularizer"] for row in mp_sae_history],
+        color="#CC79A7", marker="^", linestyle=":", label="1.3 x MMPOT",
+    )
+    axes[1].set_title("(b) MP-SAE", loc="left", fontweight="bold")
+    axes[1].set_ylabel("Training loss")
+    axes[1].legend(frameon=False)
+
+    for axis in axes:
+        axis.set_xlabel("Epoch")
+        axis.grid(axis="y", color="#B8B8B8", linestyle=(0, (2, 2)), linewidth=0.55, alpha=0.65)
+        axis.set_axisbelow(True)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+    fig.savefig(output_dir / "training_diagnostics.pdf", bbox_inches="tight")
+    fig.savefig(output_dir / "training_diagnostics.png", dpi=600, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -884,85 +1214,113 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     device = choose_device(args.device)
     print(f"device={device} output={args.output_dir}", flush=True)
 
-    backbone = FrozenResNet18(args.weights_cache).to(device)
-    train_meta = cache_split(
-        "train", args.data_root, backbone, device, args.cache_dir, args.feature_batch_size,
-        args.workers, args.max_train, args.seed, args.rebuild_cache,
-        args.data_backend, args.hf_dataset_id, args.hf_revision, args.hf_token_env,
-    )
-    val_meta = cache_split(
-        "val", args.data_root, backbone, device, args.cache_dir, args.feature_batch_size,
-        args.workers, args.max_val, args.seed, args.rebuild_cache,
-        args.data_backend, args.hf_dataset_id, args.hf_revision, args.hf_token_env,
-    )
-    del backbone
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-
-    train_features, train_labels, _ = cache_paths(args.cache_dir, "train")
-    val_features, val_labels, _ = cache_paths(args.cache_dir, "val")
-    train_data = CachedFeatures(train_features, train_labels)
-    val_data = CachedFeatures(val_features, val_labels)
-
-    seed_all(args.seed)
-    template = TopKSAE(512, args.hidden_dim, args.dead_steps)
-    # Initialize pre-bias to the cached feature mean, as in SAE practice.
-    sample_count = min(len(train_data.features), 100_000)
-    template.pre_bias.data.copy_(
-        torch.from_numpy(np.asarray(train_data.features[:sample_count], dtype=np.float32).mean(axis=0))
-    )
-    initial_state = {key: value.clone() for key, value in template.state_dict().items()}
     results: Dict[str, Any] = {}
-    if args.method in ("csr", "both"):
+    dataset_metadata: Dict[str, Any] = {}
+
+    if args.method in (MATRYOSHKA, "both"):
         seed_all(args.seed)
-        model, history = train_method("csr", initial_state, train_data, device, args)
-        knn = benchmark_method("csr", model, train_data, val_data, device, args)
-        results["csr"] = {"history": history, "knn": knn}
-        atomic_json(results["csr"], args.output_dir / "csr" / "results.json")
-        del model
+        matryoshka_model, history = train_matryoshka_backbone(device, args)
+        nested_dims = list(matryoshka_model.nested_dims)
+        mrl_train_meta = cache_matryoshka_split("train", matryoshka_model, device, args)
+        mrl_val_meta = cache_matryoshka_split("val", matryoshka_model, device, args)
+        mrl_cache_dir = args.output_dir / MATRYOSHKA / "feature_cache"
+        mrl_train_features, mrl_train_labels, _ = cache_paths(mrl_cache_dir, "train")
+        mrl_val_features, mrl_val_labels, _ = cache_paths(mrl_cache_dir, "val")
+        mrl_train_data = CachedFeatures(mrl_train_features, mrl_train_labels)
+        mrl_val_data = CachedFeatures(mrl_val_features, mrl_val_labels)
+        knn = benchmark_method(
+            MATRYOSHKA, None, mrl_train_data, mrl_val_data, device, args
+        )
+        results[MATRYOSHKA] = {
+            "display_name": METHOD_LABELS[MATRYOSHKA],
+            "training_protocol": "end_to_end_resnet18_mrl_mean_cross_entropy",
+            "nested_dims": nested_dims,
+            "history": history,
+            "knn": knn,
+        }
+        dataset_metadata[MATRYOSHKA] = {
+            "train": mrl_train_meta, "validation": mrl_val_meta
+        }
+        atomic_json(
+            results[MATRYOSHKA], args.output_dir / MATRYOSHKA / "results.json"
+        )
+        del matryoshka_model, mrl_train_data, mrl_val_data
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    if args.method in ("mmpot", "both"):
-        grid: Dict[str, Any] = {}
-        for weight in args.mmpot_weights:
-            seed_all(args.seed)
-            candidate_args = argparse.Namespace(**vars(args))
-            candidate_args.mmpot_weight = weight
-            run_name = f"mmpot_weight_{weight:.1f}".replace(".", "p")
-            model, history = train_method(
-                "mmpot", initial_state, train_data, device, candidate_args, run_name=run_name
-            )
-            knn = benchmark_method(run_name, model, train_data, val_data, device, candidate_args)
-            candidate = {"weight": weight, "history": history, "knn": knn, "selected": False}
-            grid[f"{weight:g}"] = candidate
-            atomic_json(candidate, args.output_dir / run_name / "results.json")
-            del model
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
-        selected_key = max(grid, key=lambda key: (mean_knn_top1(grid[key]), -grid[key]["weight"]))
-        grid[selected_key]["selected"] = True
-        results["mmpot_grid"] = grid
-        results["mmpot"] = grid[selected_key]
-        write_grid_search(grid, args.output_dir / "mmpot_weight_grid.csv")
-        plot_grid_search(results, args.output_dir)
-        atomic_json(
-            {"selection_metric": "mean_top1_across_topk", "selected_weight": grid[selected_key]["weight"],
-             "candidates": {key: mean_knn_top1(value) for key, value in grid.items()}},
-            args.output_dir / "mmpot_weight_selection.json",
+    if args.method in (MP_SAE, "both"):
+        frozen_backbone = FrozenResNet18(args.weights_cache).to(device)
+        frozen_train_meta = cache_split(
+            "train", args.data_root, frozen_backbone, device, args.cache_dir,
+            args.feature_batch_size, args.workers, args.max_train, args.seed,
+            args.rebuild_cache, args.data_backend, args.hf_dataset_id,
+            args.hf_revision, args.hf_token_env,
         )
-        print(f"selected MMPOT weight={grid[selected_key]['weight']:g} "
-              f"mean_top1={mean_knn_top1(grid[selected_key]):.4f}", flush=True)
+        frozen_val_meta = cache_split(
+            "val", args.data_root, frozen_backbone, device, args.cache_dir,
+            args.feature_batch_size, args.workers, args.max_val, args.seed,
+            args.rebuild_cache, args.data_backend, args.hf_dataset_id,
+            args.hf_revision, args.hf_token_env,
+        )
+        del frozen_backbone
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        train_features, train_labels, _ = cache_paths(args.cache_dir, "train")
+        val_features, val_labels, _ = cache_paths(args.cache_dir, "val")
+        train_data = CachedFeatures(train_features, train_labels)
+        val_data = CachedFeatures(val_features, val_labels)
+        seed_all(args.seed)
+        template = TopKSAE(512, args.hidden_dim, args.dead_steps)
+        sample_count = min(len(train_data.features), 100_000)
+        template.pre_bias.data.copy_(
+            torch.from_numpy(
+                np.asarray(train_data.features[:sample_count], dtype=np.float32).mean(axis=0)
+            )
+        )
+        initial_state = {key: value.clone() for key, value in template.state_dict().items()}
+        model, history = train_mp_sae(initial_state, train_data, device, args)
+        knn = benchmark_method(MP_SAE, model, train_data, val_data, device, args)
+        results[MP_SAE] = {
+            "display_name": METHOD_LABELS[MP_SAE],
+            "training_protocol": "frozen_resnet18_topk_sae_plus_mmpot",
+            "mmpot_loss_weight": MMPOT_LOSS_WEIGHT,
+            "history": history,
+            "knn": knn,
+        }
+        dataset_metadata[MP_SAE] = {
+            "train": frozen_train_meta, "validation": frozen_val_meta
+        }
+        atomic_json(results[MP_SAE], args.output_dir / MP_SAE / "results.json")
+        del model, train_data, val_data
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     summary = {
-        "experiment": "CSR_InfoNCE_vs_CSR_Multimarginal_Partial_Matching_Gap",
-        "backbone": "frozen_torchvision_resnet18_IMAGENET1K_V1",
-        "dataset": {"train": train_meta, "validation": val_meta},
+        "experiment": "Matryoshka_ResNet18_vs_Multimarginal_Presentation_with_Sparse_Autoencoder",
+        "method_labels": METHOD_LABELS,
+        "comparison_protocol": {
+            "dataset": "ImageNet-1K",
+            "metric": "exact_L2_1NN_top1",
+            "gallery": "training_split",
+            "queries": "validation_split",
+            "budget_definition": {
+                MATRYOSHKA: "ResNet-18 feature-prefix dimension",
+                MP_SAE: "number of active Top-K sparse latents",
+            },
+            "mmpot_loss_weight": MMPOT_LOSS_WEIGHT,
+        },
+        "dataset": dataset_metadata,
         "config": serializable_args(args),
         "results": results,
     }
     atomic_json(summary, args.output_dir / "summary.json")
-    write_comparison(results, args.output_dir / "comparison.csv")
+    rows = comparison_rows(results)
+    write_comparison_csv(rows, args.output_dir / "comparison.csv")
+    write_markdown_table(rows, args.output_dir / "comparison_table.md")
+    write_latex_table(rows, args.output_dir / "comparison_table.tex")
+    plot_publication_comparison(results, args.output_dir)
+    plot_training_diagnostics(results, args.output_dir)
     print(f"complete: {args.output_dir / 'summary.json'}", flush=True)
     return 0
 
