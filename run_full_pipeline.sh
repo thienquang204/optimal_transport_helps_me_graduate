@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Docker launcher for csr_vs_mmpot_imagenet.py. ImageNet is read from the
-# existing Docker named volume; no host /data directory is required.
+# Docker launcher for the Matryoshka ResNet-18 versus MP-SAE experiment.
+# ImageNet is read from the existing Docker named volume; no host /data
+# directory is required.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE_NAME="${IMAGE_NAME:-matryoshka-mmpot:latest}"
+IMAGE_NAME="${IMAGE_NAME:-matryoshka-mp-sae:latest}"
 DATA_VOLUME="${DATA_VOLUME:-imagenet-data}"
 DATA_ROOT="${DATA_ROOT:-/data/huggingface}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRIPT_DIR/runs}"
@@ -28,9 +29,8 @@ METHOD="${METHOD:-both}"
 DEVICE="${DEVICE:-cuda}"
 LEARNING_RATE="${LEARNING_RATE:-4e-5}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
-CONTRAST_WEIGHT="${CONTRAST_WEIGHT:-0.1}"
-TEMPERATURE="${TEMPERATURE:-0.2}"
-MMPOT_WEIGHTS="${MMPOT_WEIGHTS:-0.8,0.9,1.0,1.1,1.2,1.3}"
+MRL_LEARNING_RATE="${MRL_LEARNING_RATE:-1e-2}"
+MRL_MOMENTUM="${MRL_MOMENTUM:-0.9}"
 OT_MASS="${OT_MASS:-0.9}"
 OT_ETA="${OT_ETA:-0.2}"
 OT_ITERS="${OT_ITERS:-100}"
@@ -60,7 +60,7 @@ fi
 
 mkdir -p "$OUTPUT_ROOT"
 
-echo "Building $IMAGE_NAME with the CSR/MMPOT dependencies (including CUDA FAISS)..."
+echo "Building $IMAGE_NAME with the Matryoshka/MP-SAE dependencies (including CUDA FAISS)..."
 BUILDX_GIT_INFO=false "${docker_cmd[@]}" build --provenance=false --pull -t "$IMAGE_NAME" "$SCRIPT_DIR"
 
 python_args=(
@@ -77,9 +77,8 @@ python_args=(
     --device "$DEVICE"
     --lr "$LEARNING_RATE"
     --weight-decay "$WEIGHT_DECAY"
-    --contrast-weight "$CONTRAST_WEIGHT"
-    --temperature "$TEMPERATURE"
-    --mmpot-weights "$MMPOT_WEIGHTS"
+    --mrl-lr "$MRL_LEARNING_RATE"
+    --mrl-momentum "$MRL_MOMENTUM"
     --ot-mass "$OT_MASS"
     --ot-eta "$OT_ETA"
     --ot-iters "$OT_ITERS"
@@ -121,20 +120,21 @@ if [[ -n "${HF_TOKEN:-}" ]]; then
 fi
 docker_args+=(
     -e DATA_BACKEND=hf
-    -e CACHE_DIR=/output/csr_mmpot/resnet18_cache
-    -e OUTPUT_DIR=/output/csr_mmpot/results
-    -e WEIGHTS_CACHE=/output/csr_mmpot/weights
+    -e CACHE_DIR=/output/matryoshka_mpsae/resnet18_cache
+    -e OUTPUT_DIR=/output/matryoshka_mpsae/results
+    -e WEIGHTS_CACHE=/output/matryoshka_mpsae/weights
     -e INSTALL_DEPS=1
     -e FAISS_GPU=1
 )
 
-echo "Running frozen ResNet-18 CSR vs MMPOT"
+echo "Running end-to-end Matryoshka ResNet-18 vs frozen ResNet-18 + MP-SAE"
 echo "  ImageNet volume: $DATA_VOLUME mounted at /data"
 echo "  dataset cache:   $DATA_ROOT"
 echo "  host results:    $OUTPUT_ROOT"
 echo "  train/val limit: $MAX_TRAIN / $MAX_VAL (0 means full split)"
 echo "  FAISS GPU:       $FAISS_GPU_DEVICE (${FAISS_TEMP_MEMORY_MIB} MiB temporary memory)"
-echo "  MMPOT weights:   $MMPOT_WEIGHTS"
+echo "  MRL optimizer:   SGD lr=$MRL_LEARNING_RATE momentum=$MRL_MOMENTUM"
+echo "  MMPOT weight:    1.3 (fixed)"
 
 run_status=0
 "${docker_cmd[@]}" "${docker_args[@]}" \
